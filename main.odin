@@ -55,9 +55,11 @@ HelloTriangleApplication :: struct {
 	window:         glfw.WindowHandle,
 	instance:       vk.Instance,
 	debugMessenger: vk.DebugUtilsMessengerEXT,
+	surface:        vk.SurfaceKHR,
 	physicalDevce:  vk.PhysicalDevice,
 	device:         vk.Device,
 	graphicsQueue:  vk.Queue,
+	presentQueue:   vk.Queue,
 }
 
 run :: proc(using app: ^HelloTriangleApplication) {
@@ -87,6 +89,7 @@ initVulkan :: proc(using app: ^HelloTriangleApplication) {
 	vk.load_proc_addresses_instance(instance)
 
 	setupDebugMessenger(app)
+	createSurface(app)
 	pickPhysicalDevice(app)
 	createLogicalDevice(app)
 }
@@ -103,6 +106,7 @@ cleanup :: proc(using app: ^HelloTriangleApplication) {
 	when ENABLE_VALIDATION_LAYERS {
 		vk.DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nil)
 	}
+	vk.DestroySurfaceKHR(instance, surface, nil)
 	vk.DestroyInstance(instance, nil)
 	glfw.DestroyWindow(window)
 	glfw.Terminate()
@@ -247,11 +251,13 @@ debugCallback :: proc "system" (
 
 QueueFamilyIndices :: struct {
 	graphicsFamily: Maybe(u32),
+	presentFamily:  Maybe(u32),
 }
 
 isComplete :: proc(q: QueueFamilyIndices) -> bool {
-	_, has := q.graphicsFamily.?
-	return has
+	_, has_g := q.graphicsFamily.?
+	_, has_p := q.presentFamily.?
+	return has_g && has_p
 }
 
 pickPhysicalDevice :: proc(using app: ^HelloTriangleApplication) {
@@ -265,23 +271,26 @@ pickPhysicalDevice :: proc(using app: ^HelloTriangleApplication) {
 	must(vk.EnumeratePhysicalDevices(instance, &deviceCount, raw_data(devices)))
 
 	for device in devices {
-		if isDeviceSuitable(device) {
+		if isDeviceSuitable(app, device) {
 			physicalDevce = device
-			// break
+			break
 		}
 	}
 	log.assertf(physicalDevce != nil, "failed to find a suitable GPU!")
 }
 
-isDeviceSuitable :: proc(device: vk.PhysicalDevice) -> bool {
+isDeviceSuitable :: proc(app: ^HelloTriangleApplication, device: vk.PhysicalDevice) -> bool {
 	// props: vk.PhysicalDeviceProperties
 	// vk.GetPhysicalDeviceProperties(device, &props)
 	// log.debugf("VULKAN: device: %s type:%v", props.deviceName, props.deviceType)
-	indices := findQueueFamilies(device)
+	indices := findQueueFamilies(app, device)
 	return isComplete(indices)
 }
 
-findQueueFamilies :: proc(device: vk.PhysicalDevice) -> QueueFamilyIndices {
+findQueueFamilies :: proc(
+	app: ^HelloTriangleApplication,
+	device: vk.PhysicalDevice,
+) -> QueueFamilyIndices {
 	indices: QueueFamilyIndices
 	queueFamilyCount: u32
 	vk.GetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nil)
@@ -299,28 +308,44 @@ findQueueFamilies :: proc(device: vk.PhysicalDevice) -> QueueFamilyIndices {
 		if .GRAPHICS in queueFamily.queueFlags {
 			indices.graphicsFamily = u32(i)
 		}
+		presentSupport: b32
+		must(vk.GetPhysicalDeviceSurfaceSupportKHR(device, u32(i), app.surface, &presentSupport))
+		if presentSupport {
+			indices.presentFamily = u32(i)
+		}
 		if isComplete(indices) do break
 	}
 	return indices
 }
 
 createLogicalDevice :: proc(using app: ^HelloTriangleApplication) {
-	indices := findQueueFamilies(physicalDevce)
+	indices := findQueueFamilies(app, physicalDevce)
+	uniqueQueueFamilies: [dynamic]u32
+	defer delete(uniqueQueueFamilies)
+	append(&uniqueQueueFamilies, indices.graphicsFamily.?)
+	if uniqueQueueFamilies[0] != indices.presentFamily.? {
+		append(&uniqueQueueFamilies, indices.presentFamily.?)
+	}
+
+	queueCreateInfos := make([]vk.DeviceQueueCreateInfo, len(uniqueQueueFamilies))
+	defer delete(queueCreateInfos)
 
 	queuePriority: f32 = 1.0
-	queueCreateInfo := vk.DeviceQueueCreateInfo {
-		sType            = .DEVICE_QUEUE_CREATE_INFO,
-		queueFamilyIndex = indices.graphicsFamily.?,
-		queueCount       = 1,
-		pQueuePriorities = &queuePriority,
+	for queueFamily, i in uniqueQueueFamilies {
+		queueCreateInfos[i] = vk.DeviceQueueCreateInfo {
+			sType            = .DEVICE_QUEUE_CREATE_INFO,
+			queueFamilyIndex = queueFamily,
+			queueCount       = 1,
+			pQueuePriorities = &queuePriority,
+		}
 	}
 
 	deviceFeatures: vk.PhysicalDeviceFeatures
 
 	createInfo := vk.DeviceCreateInfo {
 		sType                 = .DEVICE_CREATE_INFO,
-		pQueueCreateInfos     = &queueCreateInfo,
-		queueCreateInfoCount  = 1,
+		pQueueCreateInfos     = raw_data(queueCreateInfos),
+		queueCreateInfoCount  = u32(len(queueCreateInfos)),
 		pEnabledFeatures      = &deviceFeatures,
 		enabledExtensionCount = 0,
 	}
@@ -334,5 +359,10 @@ createLogicalDevice :: proc(using app: ^HelloTriangleApplication) {
 
 	must(vk.CreateDevice(physicalDevce, &createInfo, nil, &device))
 	vk.GetDeviceQueue(device, indices.graphicsFamily.?, 0, &graphicsQueue)
+	vk.GetDeviceQueue(device, indices.presentFamily.?, 0, &presentQueue)
+}
+
+createSurface :: proc(using app: ^HelloTriangleApplication) {
+	must(glfw.CreateWindowSurface(instance, window, nil, &surface))
 }
 
