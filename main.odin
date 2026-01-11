@@ -55,6 +55,7 @@ HelloTriangleApplication :: struct {
 	window:         glfw.WindowHandle,
 	instance:       vk.Instance,
 	debugMessenger: vk.DebugUtilsMessengerEXT,
+	physicalDevce:  vk.PhysicalDevice,
 }
 
 run :: proc(using app: ^HelloTriangleApplication) {
@@ -84,6 +85,7 @@ initVulkan :: proc(using app: ^HelloTriangleApplication) {
 	vk.load_proc_addresses_instance(instance)
 
 	setupDebugMessenger(app)
+	pickPhysicalDevice(app)
 }
 
 mainLoop :: proc(using app: ^HelloTriangleApplication) {
@@ -237,5 +239,64 @@ debugCallback :: proc "system" (
 	}
 	log.logf(level, "VULKAN: [%s]: %s", strings.to_string(b), pCallbackData.pMessage)
 	return false
+}
+
+QueueFamilyIndices :: struct {
+	graphicsFamily: Maybe(u32),
+}
+
+isComplete :: proc(q: QueueFamilyIndices) -> bool {
+	_, has := q.graphicsFamily.?
+	return has
+}
+
+pickPhysicalDevice :: proc(using app: ^HelloTriangleApplication) {
+	deviceCount: u32
+	must(vk.EnumeratePhysicalDevices(instance, &deviceCount, nil))
+	log.assertf(deviceCount > 0, "failed to find GPUs with vulkan support")
+	log.infof("VULKAN: %d devices found", deviceCount)
+
+	devices := make([]vk.PhysicalDevice, deviceCount)
+	defer delete(devices)
+	must(vk.EnumeratePhysicalDevices(instance, &deviceCount, raw_data(devices)))
+
+	for device in devices {
+		if isDeviceSuitable(device) {
+			physicalDevce = device
+			// break
+		}
+	}
+	log.assertf(physicalDevce != nil, "failed to find a suitable GPU!")
+}
+
+isDeviceSuitable :: proc(device: vk.PhysicalDevice) -> bool {
+	// props: vk.PhysicalDeviceProperties
+	// vk.GetPhysicalDeviceProperties(device, &props)
+	// log.debugf("VULKAN: device: %s type:%v", props.deviceName, props.deviceType)
+	indices := findQueueFamilies(device)
+	return isComplete(indices)
+}
+
+findQueueFamilies :: proc(device: vk.PhysicalDevice) -> QueueFamilyIndices {
+	indices: QueueFamilyIndices
+	queueFamilyCount: u32
+	vk.GetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nil)
+	// log.infof("VULKAN: %d families found for device %v", queueFamilyCount, device)
+
+	queueFamilies := make([]vk.QueueFamilyProperties, queueFamilyCount)
+	defer delete(queueFamilies)
+	vk.GetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, raw_data(queueFamilies))
+
+	// for q in queueFamilies {
+	// 	log.debugf("VULKAN: device: %v queueFamily: %v", device, q.queueFlags)
+	// }
+
+	for queueFamily, i in queueFamilies {
+		if .GRAPHICS in queueFamily.queueFlags {
+			indices.graphicsFamily = u32(i)
+		}
+		if isComplete(indices) do break
+	}
+	return indices
 }
 
