@@ -56,6 +56,8 @@ HelloTriangleApplication :: struct {
 	instance:       vk.Instance,
 	debugMessenger: vk.DebugUtilsMessengerEXT,
 	physicalDevce:  vk.PhysicalDevice,
+	device:         vk.Device,
+	graphicsQueue:  vk.Queue,
 }
 
 run :: proc(using app: ^HelloTriangleApplication) {
@@ -86,6 +88,7 @@ initVulkan :: proc(using app: ^HelloTriangleApplication) {
 
 	setupDebugMessenger(app)
 	pickPhysicalDevice(app)
+	createLogicalDevice(app)
 }
 
 mainLoop :: proc(using app: ^HelloTriangleApplication) {
@@ -96,6 +99,7 @@ mainLoop :: proc(using app: ^HelloTriangleApplication) {
 }
 
 cleanup :: proc(using app: ^HelloTriangleApplication) {
+	vk.DestroyDevice(device, nil)
 	when ENABLE_VALIDATION_LAYERS {
 		vk.DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nil)
 	}
@@ -298,5 +302,37 @@ findQueueFamilies :: proc(device: vk.PhysicalDevice) -> QueueFamilyIndices {
 		if isComplete(indices) do break
 	}
 	return indices
+}
+
+createLogicalDevice :: proc(using app: ^HelloTriangleApplication) {
+	indices := findQueueFamilies(physicalDevce)
+
+	queuePriority: f32 = 1.0
+	queueCreateInfo := vk.DeviceQueueCreateInfo {
+		sType            = .DEVICE_QUEUE_CREATE_INFO,
+		queueFamilyIndex = indices.graphicsFamily.?,
+		queueCount       = 1,
+		pQueuePriorities = &queuePriority,
+	}
+
+	deviceFeatures: vk.PhysicalDeviceFeatures
+
+	createInfo := vk.DeviceCreateInfo {
+		sType                 = .DEVICE_CREATE_INFO,
+		pQueueCreateInfos     = &queueCreateInfo,
+		queueCreateInfoCount  = 1,
+		pEnabledFeatures      = &deviceFeatures,
+		enabledExtensionCount = 0,
+	}
+
+	when ENABLE_VALIDATION_LAYERS {
+		createInfo.enabledLayerCount = u32(len(validationLayers))
+		createInfo.ppEnabledLayerNames = raw_data(validationLayers[:])
+	} else {
+		createInfo.enabledLayerCount = 0
+	}
+
+	must(vk.CreateDevice(physicalDevce, &createInfo, nil, &device))
+	vk.GetDeviceQueue(device, indices.graphicsFamily.?, 0, &graphicsQueue)
 }
 
