@@ -73,6 +73,7 @@ HelloTriangleApplication :: struct {
 	swapChainImageFormat: vk.Format,
 	swapChainExtent:      vk.Extent2D,
 	swapChainImageViews:  []vk.ImageView,
+	pipelineLayout:       vk.PipelineLayout,
 }
 
 run :: proc(using app: ^HelloTriangleApplication) {
@@ -121,6 +122,7 @@ mainLoop :: proc(using app: ^HelloTriangleApplication) {
 }
 
 cleanup :: proc(using app: ^HelloTriangleApplication) {
+	vk.DestroyPipelineLayout(device, pipelineLayout, nil)
 	for imageView in swapChainImageViews {
 		vk.DestroyImageView(device, imageView, nil)
 	}
@@ -583,8 +585,79 @@ createGraphicsPipeline :: proc(using app: ^HelloTriangleApplication) {
 		vertShaderStageCreateInfo,
 		fragShaderStageCreateInfo,
 	}
-	log.debug(shaderStages)
 
+	vertexInputInfo := vk.PipelineVertexInputStateCreateInfo {
+		sType                           = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+		vertexBindingDescriptionCount   = 0,
+		vertexAttributeDescriptionCount = 0,
+	}
+
+	inputAssembly := vk.PipelineInputAssemblyStateCreateInfo {
+		sType                  = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+		topology               = .TRIANGLE_LIST,
+		primitiveRestartEnable = false,
+	}
+
+	viewport := vk.Viewport {
+		x        = 0,
+		y        = 0,
+		width    = f32(swapChainExtent.width),
+		height   = f32(swapChainExtent.height),
+		minDepth = 0,
+		maxDepth = 1,
+	}
+
+	scissor := vk.Rect2D {
+		offset = {0, 0},
+		extent = swapChainExtent,
+	}
+
+	viewportState := vk.PipelineViewportStateCreateInfo {
+		sType         = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+		viewportCount = 1,
+		pViewports    = &viewport,
+		scissorCount  = 1,
+		pScissors     = &scissor,
+	}
+
+	rasterizer := vk.PipelineRasterizationStateCreateInfo {
+		sType                   = .PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+		depthClampEnable        = false,
+		rasterizerDiscardEnable = false,
+		polygonMode             = .FILL,
+		lineWidth               = 1.0,
+		cullMode                = {.BACK},
+		frontFace               = .CLOCKWISE,
+		depthBiasEnable         = false,
+	}
+
+	multisampling := vk.PipelineMultisampleStateCreateInfo {
+		sType                = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+		sampleShadingEnable  = false,
+		rasterizationSamples = {._1},
+	}
+
+	colorBlendAttachment := vk.PipelineColorBlendAttachmentState {
+		colorWriteMask = {.R, .G, .B, .A},
+		blendEnable    = false,
+	}
+
+	colorBlending := vk.PipelineColorBlendStateCreateInfo {
+		sType           = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+		logicOpEnable   = false,
+		logicOp         = .COPY,
+		attachmentCount = 1,
+		pAttachments    = &colorBlendAttachment,
+		blendConstants  = {0, 0, 0, 0},
+	}
+
+	pipelineLayoutInfo := vk.PipelineLayoutCreateInfo {
+		sType                  = .PIPELINE_LAYOUT_CREATE_INFO,
+		setLayoutCount         = 0,
+		pushConstantRangeCount = 0,
+	}
+
+	must(vk.CreatePipelineLayout(device, &pipelineLayoutInfo, nil, &pipelineLayout))
 }
 
 createShaderModule :: proc(device: vk.Device, code: []u8) -> vk.ShaderModule {
