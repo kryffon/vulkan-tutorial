@@ -69,6 +69,7 @@ HelloTriangleApplication :: struct {
 	swapChainImages:      []vk.Image,
 	swapChainImageFormat: vk.Format,
 	swapChainExtent:      vk.Extent2D,
+	swapChainImageViews:  []vk.ImageView,
 }
 
 run :: proc(using app: ^HelloTriangleApplication) {
@@ -102,6 +103,7 @@ initVulkan :: proc(using app: ^HelloTriangleApplication) {
 	pickPhysicalDevice(app)
 	createLogicalDevice(app)
 	createSwapChain(app)
+	createImageViews(app)
 }
 
 mainLoop :: proc(using app: ^HelloTriangleApplication) {
@@ -115,6 +117,11 @@ mainLoop :: proc(using app: ^HelloTriangleApplication) {
 }
 
 cleanup :: proc(using app: ^HelloTriangleApplication) {
+	for imageView in swapChainImageViews {
+		vk.DestroyImageView(device, imageView, nil)
+	}
+	delete(swapChainImageViews)
+
 	vk.DestroySwapchainKHR(device, swapChain, nil)
 	vk.DestroyDevice(device, nil)
 	when ENABLE_VALIDATION_LAYERS {
@@ -519,5 +526,31 @@ querySwapChainSupport :: proc(
 		)
 	}
 	return details
+}
+
+createImageViews :: proc(using app: ^HelloTriangleApplication) {
+	swapChainImageViews = make([]vk.ImageView, len(swapChainImages))
+	for _, i in swapChainImages {
+		createInfo := vk.ImageViewCreateInfo {
+			sType = .IMAGE_VIEW_CREATE_INFO,
+			image = swapChainImages[i],
+			viewType = .D2,
+			format = swapChainImageFormat,
+			components = vk.ComponentMapping {
+				r = .IDENTITY,
+				g = .IDENTITY,
+				b = .IDENTITY,
+				a = .IDENTITY,
+			},
+			subresourceRange = vk.ImageSubresourceRange {
+				aspectMask = {.COLOR},
+				baseMipLevel = 0,
+				levelCount = 1,
+				baseArrayLayer = 0,
+				layerCount = 1,
+			},
+		}
+		must(vk.CreateImageView(device, &createInfo, nil, &swapChainImageViews[i]))
+	}
 }
 
