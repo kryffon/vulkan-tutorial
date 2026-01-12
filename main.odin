@@ -75,6 +75,7 @@ HelloTriangleApplication :: struct {
 	swapChainImageViews:  []vk.ImageView,
 	renderPass:           vk.RenderPass,
 	pipelineLayout:       vk.PipelineLayout,
+	graphicsPipeline:     vk.Pipeline,
 }
 
 run :: proc(using app: ^HelloTriangleApplication) {
@@ -124,6 +125,7 @@ mainLoop :: proc(using app: ^HelloTriangleApplication) {
 }
 
 cleanup :: proc(using app: ^HelloTriangleApplication) {
+	vk.DestroyPipeline(device, graphicsPipeline, nil)
 	vk.DestroyPipelineLayout(device, pipelineLayout, nil)
 	vk.DestroyRenderPass(device, renderPass, nil)
 	for imageView in swapChainImageViews {
@@ -661,6 +663,25 @@ createGraphicsPipeline :: proc(using app: ^HelloTriangleApplication) {
 	}
 
 	must(vk.CreatePipelineLayout(device, &pipelineLayoutInfo, nil, &pipelineLayout))
+
+	pipelineInfo := vk.GraphicsPipelineCreateInfo {
+		sType               = .GRAPHICS_PIPELINE_CREATE_INFO,
+		stageCount          = 2,
+		pStages             = raw_data(shaderStages[:]),
+		pVertexInputState   = &vertexInputInfo,
+		pInputAssemblyState = &inputAssembly,
+		pViewportState      = &viewportState,
+		pRasterizationState = &rasterizer,
+		pMultisampleState   = &multisampling,
+		pColorBlendState    = &colorBlending,
+		layout              = pipelineLayout,
+		renderPass          = renderPass,
+		subpass             = 0,
+		// basePipelineHandle = 0,
+		basePipelineIndex   = -1,
+	}
+
+	must(vk.CreateGraphicsPipelines(device, 0, 1, &pipelineInfo, nil, &graphicsPipeline))
 }
 
 createShaderModule :: proc(device: vk.Device, code: []u8) -> vk.ShaderModule {
