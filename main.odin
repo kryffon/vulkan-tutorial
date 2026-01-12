@@ -31,6 +31,9 @@ HEIGHT :: 600
 
 ENABLE_VALIDATION_LAYERS :: #config(ENABLE_VALIDATION_LAYERS, ODIN_DEBUG)
 
+SHADER_BASIC_VERT :: #load("./shaders/bin/basic.vert.spv")
+SHADER_BASIC_FRAG :: #load("./shaders/bin/basic.frag.spv")
+
 validationLayers := [?]cstring{"VK_LAYER_KHRONOS_validation"}
 deviceExtensions := [?]cstring{vk.KHR_SWAPCHAIN_EXTENSION_NAME}
 
@@ -104,6 +107,7 @@ initVulkan :: proc(using app: ^HelloTriangleApplication) {
 	createLogicalDevice(app)
 	createSwapChain(app)
 	createImageViews(app)
+	createGraphicsPipeline(app)
 }
 
 mainLoop :: proc(using app: ^HelloTriangleApplication) {
@@ -291,7 +295,7 @@ pickPhysicalDevice :: proc(using app: ^HelloTriangleApplication) {
 	must(vk.EnumeratePhysicalDevices(instance, &deviceCount, raw_data(devices)))
 
 	for device in devices {
-		if isDeviceSuitable(app, device) {
+		if isDeviceSuitable(surface, device) {
 			physicalDevce = device
 			break
 		}
@@ -299,16 +303,16 @@ pickPhysicalDevice :: proc(using app: ^HelloTriangleApplication) {
 	log.assertf(physicalDevce != nil, "failed to find a suitable GPU!")
 }
 
-isDeviceSuitable :: proc(app: ^HelloTriangleApplication, device: vk.PhysicalDevice) -> bool {
+isDeviceSuitable :: proc(surface: vk.SurfaceKHR, device: vk.PhysicalDevice) -> bool {
 	// props: vk.PhysicalDeviceProperties
 	// vk.GetPhysicalDeviceProperties(device, &props)
 	// log.debugf("VULKAN: device: %s type:%v", props.deviceName, props.deviceType)
-	indices := findQueueFamilies(app, device)
+	indices := findQueueFamilies(surface, device)
 	return isComplete(indices)
 }
 
 findQueueFamilies :: proc(
-	app: ^HelloTriangleApplication,
+	surface: vk.SurfaceKHR,
 	device: vk.PhysicalDevice,
 ) -> QueueFamilyIndices {
 	indices: QueueFamilyIndices
@@ -329,7 +333,7 @@ findQueueFamilies :: proc(
 			indices.graphicsFamily = u32(i)
 		}
 		presentSupport: b32
-		must(vk.GetPhysicalDeviceSurfaceSupportKHR(device, u32(i), app.surface, &presentSupport))
+		must(vk.GetPhysicalDeviceSurfaceSupportKHR(device, u32(i), surface, &presentSupport))
 		if presentSupport {
 			indices.presentFamily = u32(i)
 		}
@@ -339,7 +343,7 @@ findQueueFamilies :: proc(
 }
 
 createLogicalDevice :: proc(using app: ^HelloTriangleApplication) {
-	indices := findQueueFamilies(app, physicalDevce)
+	indices := findQueueFamilies(surface, physicalDevce)
 	uniqueQueueFamilies: [dynamic]u32
 	defer delete(uniqueQueueFamilies)
 	append(&uniqueQueueFamilies, indices.graphicsFamily.?)
@@ -394,13 +398,13 @@ SwapChainSupportDetails :: struct {
 }
 
 createSwapChain :: proc(using app: ^HelloTriangleApplication) {
-	swapChainSupport: SwapChainSupportDetails = querySwapChainSupport(app, physicalDevce)
+	swapChainSupport: SwapChainSupportDetails = querySwapChainSupport(surface, physicalDevce)
 	defer delete(swapChainSupport.formats)
 	defer delete(swapChainSupport.presentModes)
 
 	surfaceFormat: vk.SurfaceFormatKHR = chooseSwapSurfaceFormat(swapChainSupport.formats)
 	presentMode: vk.PresentModeKHR = chooseSwapPresentMode(swapChainSupport.presentModes)
-	extent: vk.Extent2D = chooseSwapExtent(app, &swapChainSupport.capabilities)
+	extent: vk.Extent2D = chooseSwapExtent(window, &swapChainSupport.capabilities)
 
 	imageCount: u32 = swapChainSupport.capabilities.minImageCount + 1
 	// maxImageCount == 0 means no upper limit
@@ -420,7 +424,7 @@ createSwapChain :: proc(using app: ^HelloTriangleApplication) {
 		imageUsage       = {.COLOR_ATTACHMENT},
 	}
 
-	indices := findQueueFamilies(app, physicalDevce)
+	indices := findQueueFamilies(surface, physicalDevce)
 	queueFamilyIndices := [?]u32{indices.graphicsFamily.?, indices.presentFamily.?}
 
 	if queueFamilyIndices[0] != queueFamilyIndices[1] {
@@ -468,13 +472,13 @@ chooseSwapPresentMode :: proc(availablePresentModes: []vk.PresentModeKHR) -> vk.
 }
 
 chooseSwapExtent :: proc(
-	app: ^HelloTriangleApplication,
+	window: glfw.WindowHandle,
 	capabilities: ^vk.SurfaceCapabilitiesKHR,
 ) -> vk.Extent2D {
 	if capabilities.currentExtent.width != bits.U32_MAX {
 		return capabilities.currentExtent
 	} else {
-		width, height := glfw.GetFramebufferSize(app.window)
+		width, height := glfw.GetFramebufferSize(window)
 		actualExtent := vk.Extent2D{u32(width), u32(height)}
 		actualExtent.width = clamp(
 			actualExtent.width,
@@ -491,21 +495,21 @@ chooseSwapExtent :: proc(
 }
 
 querySwapChainSupport :: proc(
-	app: ^HelloTriangleApplication,
+	surface: vk.SurfaceKHR,
 	device: vk.PhysicalDevice,
 ) -> SwapChainSupportDetails {
 	details: SwapChainSupportDetails
 
-	must(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(device, app.surface, &details.capabilities))
+	must(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, &details.capabilities))
 
 	formatCount: u32
-	must(vk.GetPhysicalDeviceSurfaceFormatsKHR(device, app.surface, &formatCount, nil))
+	must(vk.GetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, nil))
 	if formatCount != 0 {
 		details.formats = make([]vk.SurfaceFormatKHR, formatCount)
 		must(
 			vk.GetPhysicalDeviceSurfaceFormatsKHR(
 				device,
-				app.surface,
+				surface,
 				&formatCount,
 				raw_data(details.formats),
 			),
@@ -513,13 +517,13 @@ querySwapChainSupport :: proc(
 	}
 
 	presentModeCount: u32
-	must(vk.GetPhysicalDeviceSurfacePresentModesKHR(device, app.surface, &presentModeCount, nil))
+	must(vk.GetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, nil))
 	if presentModeCount != 0 {
 		details.presentModes = make([]vk.PresentModeKHR, presentModeCount)
 		must(
 			vk.GetPhysicalDeviceSurfacePresentModesKHR(
 				device,
-				app.surface,
+				surface,
 				&presentModeCount,
 				raw_data(details.presentModes),
 			),
@@ -552,5 +556,46 @@ createImageViews :: proc(using app: ^HelloTriangleApplication) {
 		}
 		must(vk.CreateImageView(device, &createInfo, nil, &swapChainImageViews[i]))
 	}
+}
+
+createGraphicsPipeline :: proc(using app: ^HelloTriangleApplication) {
+	vertShaderModule: vk.ShaderModule = createShaderModule(device, SHADER_BASIC_VERT)
+	fragShaderModule: vk.ShaderModule = createShaderModule(device, SHADER_BASIC_FRAG)
+	defer {
+		vk.DestroyShaderModule(device, fragShaderModule, nil)
+		vk.DestroyShaderModule(device, vertShaderModule, nil)
+	}
+
+	vertShaderStageCreateInfo := vk.PipelineShaderStageCreateInfo {
+		sType  = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+		stage  = {.VERTEX},
+		module = vertShaderModule,
+		pName  = "main",
+	}
+	fragShaderStageCreateInfo := vk.PipelineShaderStageCreateInfo {
+		sType  = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+		stage  = {.FRAGMENT},
+		module = fragShaderModule,
+		pName  = "main",
+	}
+
+	shaderStages := [?]vk.PipelineShaderStageCreateInfo {
+		vertShaderStageCreateInfo,
+		fragShaderStageCreateInfo,
+	}
+	log.debug(shaderStages)
+
+}
+
+createShaderModule :: proc(device: vk.Device, code: []u8) -> vk.ShaderModule {
+	createInfo := vk.ShaderModuleCreateInfo {
+		sType    = .SHADER_MODULE_CREATE_INFO,
+		codeSize = len(code),
+		pCode    = raw_data(slice.reinterpret([]u32, code)),
+	}
+
+	shaderModule: vk.ShaderModule
+	must(vk.CreateShaderModule(device, &createInfo, nil, &shaderModule))
+	return shaderModule
 }
 
