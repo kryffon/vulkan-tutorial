@@ -3,10 +3,12 @@ package main
 import "base:runtime"
 import "core:fmt"
 import "core:log"
+import "core:math/bits"
 import "core:mem"
 import "core:os"
 import "core:slice"
 import "core:strings"
+import "core:time"
 import "vendor:glfw"
 import vk "vendor:vulkan"
 
@@ -28,6 +30,9 @@ WIDTH :: 800
 HEIGHT :: 600
 
 ENABLE_VALIDATION_LAYERS :: #config(ENABLE_VALIDATION_LAYERS, ODIN_DEBUG)
+
+validationLayers := [?]cstring{"VK_LAYER_KHRONOS_validation"}
+deviceExtensions := [?]cstring{vk.KHR_SWAPCHAIN_EXTENSION_NAME}
 
 main :: proc() {
 	context.logger = log.create_console_logger(opt = log.Options{.Level})
@@ -52,14 +57,18 @@ main :: proc() {
 }
 
 HelloTriangleApplication :: struct {
-	window:         glfw.WindowHandle,
-	instance:       vk.Instance,
-	debugMessenger: vk.DebugUtilsMessengerEXT,
-	surface:        vk.SurfaceKHR,
-	physicalDevce:  vk.PhysicalDevice,
-	device:         vk.Device,
-	graphicsQueue:  vk.Queue,
-	presentQueue:   vk.Queue,
+	window:               glfw.WindowHandle,
+	instance:             vk.Instance,
+	debugMessenger:       vk.DebugUtilsMessengerEXT,
+	surface:              vk.SurfaceKHR,
+	physicalDevce:        vk.PhysicalDevice,
+	device:               vk.Device,
+	graphicsQueue:        vk.Queue,
+	presentQueue:         vk.Queue,
+	swapChain:            vk.SwapchainKHR,
+	swapChainImages:      []vk.Image,
+	swapChainImageFormat: vk.Format,
+	swapChainExtent:      vk.Extent2D,
 }
 
 run :: proc(using app: ^HelloTriangleApplication) {
@@ -92,16 +101,21 @@ initVulkan :: proc(using app: ^HelloTriangleApplication) {
 	createSurface(app)
 	pickPhysicalDevice(app)
 	createLogicalDevice(app)
+	createSwapChain(app)
 }
 
 mainLoop :: proc(using app: ^HelloTriangleApplication) {
+	start := time.tick_now()
 	for !glfw.WindowShouldClose(window) {
 		glfw.PollEvents()
-		glfw.SetWindowShouldClose(window, true)
+		if time.tick_diff(start, time.tick_now()) > 2 * time.Second {
+			glfw.SetWindowShouldClose(window, true)
+		}
 	}
 }
 
 cleanup :: proc(using app: ^HelloTriangleApplication) {
+	vk.DestroySwapchainKHR(device, swapChain, nil)
 	vk.DestroyDevice(device, nil)
 	when ENABLE_VALIDATION_LAYERS {
 		vk.DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nil)
@@ -111,6 +125,7 @@ cleanup :: proc(using app: ^HelloTriangleApplication) {
 	glfw.DestroyWindow(window)
 	glfw.Terminate()
 
+	delete(swapChainImages)
 }
 
 printVkExtensions :: proc(using app: ^HelloTriangleApplication) {
@@ -124,8 +139,6 @@ printVkExtensions :: proc(using app: ^HelloTriangleApplication) {
 	// 	log.infof("\t%s (version: %v)", e.extensionName, e.specVersion)
 	// }
 }
-
-validationLayers := [?]cstring{"VK_LAYER_KHRONOS_validation"}
 
 createInstance :: proc(using app: ^HelloTriangleApplication) {
 	when ENABLE_VALIDATION_LAYERS {
@@ -343,11 +356,12 @@ createLogicalDevice :: proc(using app: ^HelloTriangleApplication) {
 	deviceFeatures: vk.PhysicalDeviceFeatures
 
 	createInfo := vk.DeviceCreateInfo {
-		sType                 = .DEVICE_CREATE_INFO,
-		pQueueCreateInfos     = raw_data(queueCreateInfos),
-		queueCreateInfoCount  = u32(len(queueCreateInfos)),
-		pEnabledFeatures      = &deviceFeatures,
-		enabledExtensionCount = 0,
+		sType                   = .DEVICE_CREATE_INFO,
+		pQueueCreateInfos       = raw_data(queueCreateInfos),
+		queueCreateInfoCount    = u32(len(queueCreateInfos)),
+		pEnabledFeatures        = &deviceFeatures,
+		enabledExtensionCount   = u32(len(deviceExtensions)),
+		ppEnabledExtensionNames = raw_data(deviceExtensions[:]),
 	}
 
 	when ENABLE_VALIDATION_LAYERS {
@@ -364,5 +378,146 @@ createLogicalDevice :: proc(using app: ^HelloTriangleApplication) {
 
 createSurface :: proc(using app: ^HelloTriangleApplication) {
 	must(glfw.CreateWindowSurface(instance, window, nil, &surface))
+}
+
+SwapChainSupportDetails :: struct {
+	capabilities: vk.SurfaceCapabilitiesKHR,
+	formats:      []vk.SurfaceFormatKHR,
+	presentModes: []vk.PresentModeKHR,
+}
+
+createSwapChain :: proc(using app: ^HelloTriangleApplication) {
+	swapChainSupport: SwapChainSupportDetails = querySwapChainSupport(app, physicalDevce)
+	defer delete(swapChainSupport.formats)
+	defer delete(swapChainSupport.presentModes)
+
+	surfaceFormat: vk.SurfaceFormatKHR = chooseSwapSurfaceFormat(swapChainSupport.formats)
+	presentMode: vk.PresentModeKHR = chooseSwapPresentMode(swapChainSupport.presentModes)
+	extent: vk.Extent2D = chooseSwapExtent(app, &swapChainSupport.capabilities)
+
+	imageCount: u32 = swapChainSupport.capabilities.minImageCount + 1
+	// maxImageCount == 0 means no upper limit
+	if swapChainSupport.capabilities.maxImageCount > 0 {
+		imageCount = min(imageCount, swapChainSupport.capabilities.maxImageCount)
+	}
+
+	createInfo := vk.SwapchainCreateInfoKHR {
+		sType            = .SWAPCHAIN_CREATE_INFO_KHR,
+		surface          = surface,
+		minImageCount    = imageCount,
+		imageFormat      = surfaceFormat.format,
+		imageColorSpace  = surfaceFormat.colorSpace,
+		imageExtent      = extent,
+		// imageArrayLayers > 1 if 3D stereo
+		imageArrayLayers = 1,
+		imageUsage       = {.COLOR_ATTACHMENT},
+	}
+
+	indices := findQueueFamilies(app, physicalDevce)
+	queueFamilyIndices := [?]u32{indices.graphicsFamily.?, indices.presentFamily.?}
+
+	if queueFamilyIndices[0] != queueFamilyIndices[1] {
+		createInfo.imageSharingMode = .CONCURRENT
+		createInfo.queueFamilyIndexCount = 2
+		createInfo.pQueueFamilyIndices = raw_data(queueFamilyIndices[:])
+	} else {
+		createInfo.imageSharingMode = .EXCLUSIVE
+	}
+
+	// if we want to add some type of transform(like flipping, etc) before presenting, do here
+	createInfo.preTransform = swapChainSupport.capabilities.currentTransform
+	createInfo.compositeAlpha = {.OPAQUE}
+	createInfo.presentMode = presentMode
+	createInfo.clipped = true
+	// createInfo.oldSwapchain = 0
+
+	must(vk.CreateSwapchainKHR(device, &createInfo, nil, &swapChain))
+
+	must(vk.GetSwapchainImagesKHR(device, swapChain, &imageCount, nil))
+	swapChainImages = make([]vk.Image, imageCount)
+	must(vk.GetSwapchainImagesKHR(device, swapChain, &imageCount, raw_data(swapChainImages)))
+
+	swapChainImageFormat = surfaceFormat.format
+	swapChainExtent = extent
+}
+
+chooseSwapSurfaceFormat :: proc(availableFormats: []vk.SurfaceFormatKHR) -> vk.SurfaceFormatKHR {
+	for availableFormat in availableFormats {
+		if availableFormat.format == .B8G8R8A8_SRGB &&
+		   availableFormat.colorSpace == .SRGB_NONLINEAR {
+			return availableFormat
+		}
+	}
+	return availableFormats[0]
+}
+
+chooseSwapPresentMode :: proc(availablePresentModes: []vk.PresentModeKHR) -> vk.PresentModeKHR {
+	for availablePresentMode in availablePresentModes {
+		if availablePresentMode == .MAILBOX {
+			return availablePresentMode
+		}
+	}
+	return .FIFO
+}
+
+chooseSwapExtent :: proc(
+	app: ^HelloTriangleApplication,
+	capabilities: ^vk.SurfaceCapabilitiesKHR,
+) -> vk.Extent2D {
+	if capabilities.currentExtent.width != bits.U32_MAX {
+		return capabilities.currentExtent
+	} else {
+		width, height := glfw.GetFramebufferSize(app.window)
+		actualExtent := vk.Extent2D{u32(width), u32(height)}
+		actualExtent.width = clamp(
+			actualExtent.width,
+			capabilities.minImageExtent.width,
+			capabilities.maxImageExtent.width,
+		)
+		actualExtent.height = clamp(
+			actualExtent.height,
+			capabilities.minImageExtent.height,
+			capabilities.maxImageExtent.height,
+		)
+		return actualExtent
+	}
+}
+
+querySwapChainSupport :: proc(
+	app: ^HelloTriangleApplication,
+	device: vk.PhysicalDevice,
+) -> SwapChainSupportDetails {
+	details: SwapChainSupportDetails
+
+	must(vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(device, app.surface, &details.capabilities))
+
+	formatCount: u32
+	must(vk.GetPhysicalDeviceSurfaceFormatsKHR(device, app.surface, &formatCount, nil))
+	if formatCount != 0 {
+		details.formats = make([]vk.SurfaceFormatKHR, formatCount)
+		must(
+			vk.GetPhysicalDeviceSurfaceFormatsKHR(
+				device,
+				app.surface,
+				&formatCount,
+				raw_data(details.formats),
+			),
+		)
+	}
+
+	presentModeCount: u32
+	must(vk.GetPhysicalDeviceSurfacePresentModesKHR(device, app.surface, &presentModeCount, nil))
+	if presentModeCount != 0 {
+		details.presentModes = make([]vk.PresentModeKHR, presentModeCount)
+		must(
+			vk.GetPhysicalDeviceSurfacePresentModesKHR(
+				device,
+				app.surface,
+				&presentModeCount,
+				raw_data(details.presentModes),
+			),
+		)
+	}
+	return details
 }
 
