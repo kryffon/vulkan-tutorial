@@ -73,6 +73,7 @@ HelloTriangleApplication :: struct {
 	swapChainImageFormat: vk.Format,
 	swapChainExtent:      vk.Extent2D,
 	swapChainImageViews:  []vk.ImageView,
+	renderPass:           vk.RenderPass,
 	pipelineLayout:       vk.PipelineLayout,
 }
 
@@ -108,6 +109,7 @@ initVulkan :: proc(using app: ^HelloTriangleApplication) {
 	createLogicalDevice(app)
 	createSwapChain(app)
 	createImageViews(app)
+	createRenderPass(app)
 	createGraphicsPipeline(app)
 }
 
@@ -123,6 +125,7 @@ mainLoop :: proc(using app: ^HelloTriangleApplication) {
 
 cleanup :: proc(using app: ^HelloTriangleApplication) {
 	vk.DestroyPipelineLayout(device, pipelineLayout, nil)
+	vk.DestroyRenderPass(device, renderPass, nil)
 	for imageView in swapChainImageViews {
 		vk.DestroyImageView(device, imageView, nil)
 	}
@@ -670,5 +673,39 @@ createShaderModule :: proc(device: vk.Device, code: []u8) -> vk.ShaderModule {
 	shaderModule: vk.ShaderModule
 	must(vk.CreateShaderModule(device, &createInfo, nil, &shaderModule))
 	return shaderModule
+}
+
+createRenderPass :: proc(using app: ^HelloTriangleApplication) {
+	colorAttachment := vk.AttachmentDescription {
+		format         = swapChainImageFormat,
+		samples        = {._1},
+		loadOp         = .CLEAR,
+		storeOp        = .STORE,
+		stencilLoadOp  = .DONT_CARE,
+		stencilStoreOp = .DONT_CARE,
+		initialLayout  = .UNDEFINED,
+		finalLayout    = .PRESENT_SRC_KHR,
+	}
+
+	colorAttachmentRef := vk.AttachmentReference {
+		attachment = 0,
+		layout     = .COLOR_ATTACHMENT_OPTIMAL,
+	}
+
+	subpass := vk.SubpassDescription {
+		pipelineBindPoint    = .GRAPHICS,
+		colorAttachmentCount = 1,
+		pColorAttachments    = &colorAttachmentRef,
+	}
+
+	renderPassInfo := vk.RenderPassCreateInfo {
+		sType           = .RENDER_PASS_CREATE_INFO,
+		attachmentCount = 1,
+		pAttachments    = &colorAttachment,
+		subpassCount    = 1,
+		pSubpasses      = &subpass,
+	}
+
+	must(vk.CreateRenderPass(device, &renderPassInfo, nil, &renderPass))
 }
 
