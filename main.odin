@@ -15,9 +15,11 @@ import vk "vendor:vulkan"
 g_context: runtime.Context
 
 must :: proc(res: vk.Result, location := #caller_location) {
-	if res != .SUCCESS {
-		log.fatalf("[%v] %v", location, res)
-		os.exit(int(res))
+	when ODIN_DEBUG {
+		if res != .SUCCESS {
+			log.fatalf("[%v] %v", location, res)
+			os.exit(int(res))
+		}
 	}
 }
 
@@ -77,6 +79,8 @@ HelloTriangleApplication :: struct {
 	renderPass:            vk.RenderPass,
 	pipelineLayout:        vk.PipelineLayout,
 	graphicsPipeline:      vk.Pipeline,
+	commandPool:           vk.CommandPool,
+	commandBuffers:        []vk.CommandBuffer,
 }
 
 run :: proc(using app: ^HelloTriangleApplication) {
@@ -114,6 +118,8 @@ initVulkan :: proc(using app: ^HelloTriangleApplication) {
 	createRenderPass(app)
 	createGraphicsPipeline(app)
 	createFramebuffers(app)
+	createCommandPool(app)
+	createCommandBuffers(app)
 }
 
 mainLoop :: proc(using app: ^HelloTriangleApplication) {
@@ -127,6 +133,7 @@ mainLoop :: proc(using app: ^HelloTriangleApplication) {
 }
 
 cleanup :: proc(using app: ^HelloTriangleApplication) {
+	vk.DestroyCommandPool(device, commandPool, nil)
 	for framebuffer in swapChainFramebuffers {
 		vk.DestroyFramebuffer(device, framebuffer, nil)
 	}
@@ -148,6 +155,7 @@ cleanup :: proc(using app: ^HelloTriangleApplication) {
 	glfw.DestroyWindow(window)
 	glfw.Terminate()
 
+	delete(commandBuffers)
 	delete(swapChainFramebuffers)
 	delete(swapChainImages)
 }
@@ -752,6 +760,55 @@ createFramebuffers :: proc(using app: ^HelloTriangleApplication) {
 			layers          = 1,
 		}
 		must(vk.CreateFramebuffer(device, &framebufferInfo, nil, &swapChainFramebuffers[i]))
+	}
+}
+
+createCommandPool :: proc(using app: ^HelloTriangleApplication) {
+	queueFamilyIndices := findQueueFamilies(surface, physicalDevce)
+	poolInfo := vk.CommandPoolCreateInfo {
+		sType            = .COMMAND_POOL_CREATE_INFO,
+		queueFamilyIndex = queueFamilyIndices.graphicsFamily.?,
+	}
+	must(vk.CreateCommandPool(device, &poolInfo, nil, &commandPool))
+}
+
+createCommandBuffers :: proc(using app: ^HelloTriangleApplication) {
+	commandBuffers = make([]vk.CommandBuffer, len(swapChainFramebuffers))
+
+	allocInfo := vk.CommandBufferAllocateInfo {
+		sType              = .COMMAND_BUFFER_ALLOCATE_INFO,
+		commandPool        = commandPool,
+		level              = .PRIMARY,
+		commandBufferCount = u32(len(commandBuffers)),
+	}
+	must(vk.AllocateCommandBuffers(device, &allocInfo, raw_data(commandBuffers)))
+
+	for _, i in commandBuffers {
+		beginInfo := vk.CommandBufferBeginInfo {
+			sType = .COMMAND_BUFFER_BEGIN_INFO,
+		}
+
+		must(vk.BeginCommandBuffer(commandBuffers[i], &beginInfo))
+
+		clearColor := vk.ClearValue {
+			color = vk.ClearColorValue{float32 = [4]f32{0, 0, 0, 1}},
+		}
+		renderPassInfo := vk.RenderPassBeginInfo {
+			sType = .RENDER_PASS_BEGIN_INFO,
+			renderPass = renderPass,
+			framebuffer = swapChainFramebuffers[i],
+			renderArea = {offset = {0, 0}, extent = swapChainExtent},
+			clearValueCount = 1,
+			pClearValues = &clearColor,
+		}
+
+		vk.CmdBeginRenderPass(commandBuffers[i], &renderPassInfo, .INLINE)
+		vk.CmdBindPipeline(commandBuffers[i], .GRAPHICS, graphicsPipeline)
+		{
+			vk.CmdDraw(commandBuffers[i], 3, 1, 0, 0)
+		}
+		vk.CmdEndRenderPass(commandBuffers[i])
+		must(vk.EndCommandBuffer(commandBuffers[i]))
 	}
 }
 
