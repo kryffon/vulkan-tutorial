@@ -60,22 +60,23 @@ main :: proc() {
 }
 
 HelloTriangleApplication :: struct {
-	window:               glfw.WindowHandle,
-	instance:             vk.Instance,
-	debugMessenger:       vk.DebugUtilsMessengerEXT,
-	surface:              vk.SurfaceKHR,
-	physicalDevce:        vk.PhysicalDevice,
-	device:               vk.Device,
-	graphicsQueue:        vk.Queue,
-	presentQueue:         vk.Queue,
-	swapChain:            vk.SwapchainKHR,
-	swapChainImages:      []vk.Image,
-	swapChainImageFormat: vk.Format,
-	swapChainExtent:      vk.Extent2D,
-	swapChainImageViews:  []vk.ImageView,
-	renderPass:           vk.RenderPass,
-	pipelineLayout:       vk.PipelineLayout,
-	graphicsPipeline:     vk.Pipeline,
+	window:                glfw.WindowHandle,
+	instance:              vk.Instance,
+	debugMessenger:        vk.DebugUtilsMessengerEXT,
+	surface:               vk.SurfaceKHR,
+	physicalDevce:         vk.PhysicalDevice,
+	device:                vk.Device,
+	graphicsQueue:         vk.Queue,
+	presentQueue:          vk.Queue,
+	swapChain:             vk.SwapchainKHR,
+	swapChainImages:       []vk.Image,
+	swapChainImageFormat:  vk.Format,
+	swapChainExtent:       vk.Extent2D,
+	swapChainImageViews:   []vk.ImageView,
+	swapChainFramebuffers: []vk.Framebuffer,
+	renderPass:            vk.RenderPass,
+	pipelineLayout:        vk.PipelineLayout,
+	graphicsPipeline:      vk.Pipeline,
 }
 
 run :: proc(using app: ^HelloTriangleApplication) {
@@ -112,6 +113,7 @@ initVulkan :: proc(using app: ^HelloTriangleApplication) {
 	createImageViews(app)
 	createRenderPass(app)
 	createGraphicsPipeline(app)
+	createFramebuffers(app)
 }
 
 mainLoop :: proc(using app: ^HelloTriangleApplication) {
@@ -125,6 +127,9 @@ mainLoop :: proc(using app: ^HelloTriangleApplication) {
 }
 
 cleanup :: proc(using app: ^HelloTriangleApplication) {
+	for framebuffer in swapChainFramebuffers {
+		vk.DestroyFramebuffer(device, framebuffer, nil)
+	}
 	vk.DestroyPipeline(device, graphicsPipeline, nil)
 	vk.DestroyPipelineLayout(device, pipelineLayout, nil)
 	vk.DestroyRenderPass(device, renderPass, nil)
@@ -143,6 +148,7 @@ cleanup :: proc(using app: ^HelloTriangleApplication) {
 	glfw.DestroyWindow(window)
 	glfw.Terminate()
 
+	delete(swapChainFramebuffers)
 	delete(swapChainImages)
 }
 
@@ -728,5 +734,24 @@ createRenderPass :: proc(using app: ^HelloTriangleApplication) {
 	}
 
 	must(vk.CreateRenderPass(device, &renderPassInfo, nil, &renderPass))
+}
+
+createFramebuffers :: proc(using app: ^HelloTriangleApplication) {
+	swapChainFramebuffers = make([]vk.Framebuffer, len(swapChainImageViews))
+
+	for _, i in swapChainImageViews {
+		attachments := [?]vk.ImageView{swapChainImageViews[i]}
+
+		framebufferInfo := vk.FramebufferCreateInfo {
+			sType           = .FRAMEBUFFER_CREATE_INFO,
+			renderPass      = renderPass,
+			attachmentCount = 1,
+			pAttachments    = raw_data(attachments[:]),
+			width           = swapChainExtent.width,
+			height          = swapChainExtent.height,
+			layers          = 1,
+		}
+		must(vk.CreateFramebuffer(device, &framebufferInfo, nil, &swapChainFramebuffers[i]))
+	}
 }
 
