@@ -87,6 +87,7 @@ HelloTriangleApplication :: struct {
 	inFlightFences:           []vk.Fence,
 	imagesInFlight:           []vk.Fence,
 	currentFrame:             int,
+	framebufferResized:       bool,
 }
 
 run :: proc(using app: ^HelloTriangleApplication) {
@@ -101,8 +102,14 @@ initWindow :: proc(using app: ^HelloTriangleApplication) {
 	assert(glfw.Init() == true)
 	// donot create opengl context
 	glfw.WindowHint(glfw.CLIENT_API, glfw.NO_API)
-	glfw.WindowHint(glfw.RESIZABLE, glfw.FALSE)
 	window = glfw.CreateWindow(WIDTH, HEIGHT, "Vulkan", nil, nil)
+	glfw.SetWindowUserPointer(window, app)
+	glfw.SetFramebufferSizeCallback(window, framebufferResizeCallback)
+}
+
+framebufferResizeCallback :: proc "c" (window: glfw.WindowHandle, width, height: i32) {
+	app := (^HelloTriangleApplication)(glfw.GetWindowUserPointer(window))
+	app.framebufferResized = true
 }
 
 initVulkan :: proc(using app: ^HelloTriangleApplication) {
@@ -140,7 +147,22 @@ mainLoop :: proc(using app: ^HelloTriangleApplication) {
 	must(vk.DeviceWaitIdle(device))
 }
 
+cleanupSwapChain :: proc(using app: ^HelloTriangleApplication) {
+	for framebuffer in swapChainFramebuffers {
+		vk.DestroyFramebuffer(device, framebuffer, nil)
+	}
+	vk.FreeCommandBuffers(device, commandPool, u32(len(commandBuffers)), raw_data(commandBuffers))
+	vk.DestroyPipeline(device, graphicsPipeline, nil)
+	vk.DestroyPipelineLayout(device, pipelineLayout, nil)
+	vk.DestroyRenderPass(device, renderPass, nil)
+	for imageView in swapChainImageViews {
+		vk.DestroyImageView(device, imageView, nil)
+	}
+	vk.DestroySwapchainKHR(device, swapChain, nil)
+}
+
 cleanup :: proc(using app: ^HelloTriangleApplication) {
+	cleanupSwapChain(app)
 	for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
 		vk.DestroySemaphore(device, renderFinishedSemaphores[i], nil)
 		vk.DestroySemaphore(device, imageAvailableSemaphores[i], nil)
@@ -148,18 +170,6 @@ cleanup :: proc(using app: ^HelloTriangleApplication) {
 	}
 
 	vk.DestroyCommandPool(device, commandPool, nil)
-	for framebuffer in swapChainFramebuffers {
-		vk.DestroyFramebuffer(device, framebuffer, nil)
-	}
-	vk.DestroyPipeline(device, graphicsPipeline, nil)
-	vk.DestroyPipelineLayout(device, pipelineLayout, nil)
-	vk.DestroyRenderPass(device, renderPass, nil)
-	for imageView in swapChainImageViews {
-		vk.DestroyImageView(device, imageView, nil)
-	}
-	delete(swapChainImageViews)
-
-	vk.DestroySwapchainKHR(device, swapChain, nil)
 	vk.DestroyDevice(device, nil)
 	when ENABLE_VALIDATION_LAYERS {
 		vk.DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nil)
@@ -172,10 +182,30 @@ cleanup :: proc(using app: ^HelloTriangleApplication) {
 	delete(commandBuffers)
 	delete(swapChainFramebuffers)
 	delete(swapChainImages)
+	delete(swapChainImageViews)
 	delete(renderFinishedSemaphores)
 	delete(imageAvailableSemaphores)
 	delete(inFlightFences)
 	delete(imagesInFlight)
+}
+
+recreateSwapChain :: proc(using app: ^HelloTriangleApplication) {
+	width, height := glfw.GetFramebufferSize(window)
+	for width == 0 || height == 0 {
+		width, height = glfw.GetFramebufferSize(window)
+		glfw.WaitEventsTimeout(0)
+	}
+	vk.DeviceWaitIdle(device)
+	cleanupSwapChain(app)
+
+	createSwapChain(app)
+	createImageViews(app)
+	createRenderPass(app)
+	createGraphicsPipeline(app)
+	createFramebuffers(app)
+	createCommandBuffers(app)
+
+	// reserve(&imagesInFlight, len(swapChainImages))
 }
 
 printVkExtensions :: proc(using app: ^HelloTriangleApplication) {
