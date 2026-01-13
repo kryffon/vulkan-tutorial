@@ -8,7 +8,6 @@ import "core:mem"
 import "core:os"
 import "core:slice"
 import "core:strings"
-import "core:time"
 import "vendor:glfw"
 import vk "vendor:vulkan"
 
@@ -36,6 +35,8 @@ ENABLE_VALIDATION_LAYERS :: #config(ENABLE_VALIDATION_LAYERS, ODIN_DEBUG)
 SHADER_BASIC_VERT :: #load("./shaders/bin/basic.vert.spv")
 SHADER_BASIC_FRAG :: #load("./shaders/bin/basic.frag.spv")
 
+MAX_FRAMES_IN_FLIGHT :: 2
+
 validationLayers := [?]cstring{"VK_LAYER_KHRONOS_validation"}
 deviceExtensions := [?]cstring{vk.KHR_SWAPCHAIN_EXTENSION_NAME}
 
@@ -62,25 +63,30 @@ main :: proc() {
 }
 
 HelloTriangleApplication :: struct {
-	window:                glfw.WindowHandle,
-	instance:              vk.Instance,
-	debugMessenger:        vk.DebugUtilsMessengerEXT,
-	surface:               vk.SurfaceKHR,
-	physicalDevce:         vk.PhysicalDevice,
-	device:                vk.Device,
-	graphicsQueue:         vk.Queue,
-	presentQueue:          vk.Queue,
-	swapChain:             vk.SwapchainKHR,
-	swapChainImages:       []vk.Image,
-	swapChainImageFormat:  vk.Format,
-	swapChainExtent:       vk.Extent2D,
-	swapChainImageViews:   []vk.ImageView,
-	swapChainFramebuffers: []vk.Framebuffer,
-	renderPass:            vk.RenderPass,
-	pipelineLayout:        vk.PipelineLayout,
-	graphicsPipeline:      vk.Pipeline,
-	commandPool:           vk.CommandPool,
-	commandBuffers:        []vk.CommandBuffer,
+	window:                   glfw.WindowHandle,
+	instance:                 vk.Instance,
+	debugMessenger:           vk.DebugUtilsMessengerEXT,
+	surface:                  vk.SurfaceKHR,
+	physicalDevce:            vk.PhysicalDevice,
+	device:                   vk.Device,
+	graphicsQueue:            vk.Queue,
+	presentQueue:             vk.Queue,
+	swapChain:                vk.SwapchainKHR,
+	swapChainImages:          []vk.Image,
+	swapChainImageFormat:     vk.Format,
+	swapChainExtent:          vk.Extent2D,
+	swapChainImageViews:      []vk.ImageView,
+	swapChainFramebuffers:    []vk.Framebuffer,
+	renderPass:               vk.RenderPass,
+	pipelineLayout:           vk.PipelineLayout,
+	graphicsPipeline:         vk.Pipeline,
+	commandPool:              vk.CommandPool,
+	commandBuffers:           []vk.CommandBuffer,
+	imageAvailableSemaphores: []vk.Semaphore,
+	renderFinishedSemaphores: []vk.Semaphore,
+	inFlightFences:           []vk.Fence,
+	imagesInFlight:           []vk.Fence,
+	currentFrame:             int,
 }
 
 run :: proc(using app: ^HelloTriangleApplication) {
@@ -120,19 +126,27 @@ initVulkan :: proc(using app: ^HelloTriangleApplication) {
 	createFramebuffers(app)
 	createCommandPool(app)
 	createCommandBuffers(app)
+	createSyncObjects(app)
 }
 
 mainLoop :: proc(using app: ^HelloTriangleApplication) {
-	start := time.tick_now()
 	for !glfw.WindowShouldClose(window) {
 		glfw.PollEvents()
-		if time.tick_diff(start, time.tick_now()) > 2 * time.Second {
+		if glfw.GetKey(window, glfw.KEY_ESCAPE) == glfw.PRESS {
 			glfw.SetWindowShouldClose(window, true)
 		}
+		drawFrame(app)
 	}
+	must(vk.DeviceWaitIdle(device))
 }
 
 cleanup :: proc(using app: ^HelloTriangleApplication) {
+	for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
+		vk.DestroySemaphore(device, renderFinishedSemaphores[i], nil)
+		vk.DestroySemaphore(device, imageAvailableSemaphores[i], nil)
+		vk.DestroyFence(device, inFlightFences[i], nil)
+	}
+
 	vk.DestroyCommandPool(device, commandPool, nil)
 	for framebuffer in swapChainFramebuffers {
 		vk.DestroyFramebuffer(device, framebuffer, nil)
@@ -158,6 +172,10 @@ cleanup :: proc(using app: ^HelloTriangleApplication) {
 	delete(commandBuffers)
 	delete(swapChainFramebuffers)
 	delete(swapChainImages)
+	delete(renderFinishedSemaphores)
+	delete(imageAvailableSemaphores)
+	delete(inFlightFences)
+	delete(imagesInFlight)
 }
 
 printVkExtensions :: proc(using app: ^HelloTriangleApplication) {
@@ -733,12 +751,23 @@ createRenderPass :: proc(using app: ^HelloTriangleApplication) {
 		pColorAttachments    = &colorAttachmentRef,
 	}
 
+	dependency := vk.SubpassDependency {
+		srcSubpass    = vk.SUBPASS_EXTERNAL,
+		dstSubpass    = 0,
+		srcStageMask  = {.COLOR_ATTACHMENT_OUTPUT},
+		// srcAccessMask = {.INDIRECT_COMMAND_READ},
+		dstStageMask  = {.COLOR_ATTACHMENT_OUTPUT},
+		dstAccessMask = {.COLOR_ATTACHMENT_WRITE},
+	}
+
 	renderPassInfo := vk.RenderPassCreateInfo {
 		sType           = .RENDER_PASS_CREATE_INFO,
 		attachmentCount = 1,
 		pAttachments    = &colorAttachment,
 		subpassCount    = 1,
 		pSubpasses      = &subpass,
+		dependencyCount = 1,
+		pDependencies   = &dependency,
 	}
 
 	must(vk.CreateRenderPass(device, &renderPassInfo, nil, &renderPass))
@@ -810,5 +839,77 @@ createCommandBuffers :: proc(using app: ^HelloTriangleApplication) {
 		vk.CmdEndRenderPass(commandBuffers[i])
 		must(vk.EndCommandBuffer(commandBuffers[i]))
 	}
+}
+
+createSyncObjects :: proc(using app: ^HelloTriangleApplication) {
+	imageAvailableSemaphores = make([]vk.Semaphore, MAX_FRAMES_IN_FLIGHT)
+	renderFinishedSemaphores = make([]vk.Semaphore, MAX_FRAMES_IN_FLIGHT)
+	inFlightFences = make([]vk.Fence, MAX_FRAMES_IN_FLIGHT)
+	imagesInFlight = make([]vk.Fence, len(swapChainImages))
+
+	semaphoreInfo := vk.SemaphoreCreateInfo {
+		sType = .SEMAPHORE_CREATE_INFO,
+	}
+	fenceInfo := vk.FenceCreateInfo {
+		sType = .FENCE_CREATE_INFO,
+		flags = {.SIGNALED},
+	}
+
+	for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
+		must(vk.CreateSemaphore(device, &semaphoreInfo, nil, &imageAvailableSemaphores[i]))
+		must(vk.CreateSemaphore(device, &semaphoreInfo, nil, &renderFinishedSemaphores[i]))
+		must(vk.CreateFence(device, &fenceInfo, nil, &inFlightFences[i]))
+	}
+}
+
+drawFrame :: proc(using app: ^HelloTriangleApplication) {
+	must(vk.WaitForFences(device, 1, raw_data(inFlightFences), true, bits.U64_MAX))
+
+	imageIndex: u32
+	// must(
+	vk.AcquireNextImageKHR(
+		device,
+		swapChain,
+		bits.U64_MAX,
+		imageAvailableSemaphores[currentFrame],
+		0,
+		&imageIndex,
+	)
+	// )
+
+	if imagesInFlight[imageIndex] != 0 {
+		must(vk.WaitForFences(device, 1, &imagesInFlight[imageIndex], true, bits.U64_MAX))
+	}
+	imagesInFlight[imageIndex] = inFlightFences[currentFrame]
+
+	waitSemaphores := [?]vk.Semaphore{imageAvailableSemaphores[currentFrame]}
+	waitStates := [?]vk.PipelineStageFlags{{.COLOR_ATTACHMENT_OUTPUT}}
+	signalSemaphores := [?]vk.Semaphore{renderFinishedSemaphores[currentFrame]}
+	submitInfo := vk.SubmitInfo {
+		sType                = .SUBMIT_INFO,
+		waitSemaphoreCount   = 1,
+		pWaitSemaphores      = raw_data(waitSemaphores[:]),
+		pWaitDstStageMask    = raw_data(waitStates[:]),
+		commandBufferCount   = 1,
+		pCommandBuffers      = &commandBuffers[imageIndex],
+		signalSemaphoreCount = 1,
+		pSignalSemaphores    = raw_data(signalSemaphores[:]),
+	}
+
+
+	must(vk.ResetFences(device, 1, &inFlightFences[currentFrame]))
+	must(vk.QueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]))
+
+	swapChains := [?]vk.SwapchainKHR{swapChain}
+	presentInfo := vk.PresentInfoKHR {
+		sType              = .PRESENT_INFO_KHR,
+		waitSemaphoreCount = 1,
+		pWaitSemaphores    = raw_data(signalSemaphores[:]),
+		swapchainCount     = 1,
+		pSwapchains        = raw_data(swapChains[:]),
+		pImageIndices      = &imageIndex,
+	}
+	vk.QueuePresentKHR(presentQueue, &presentInfo)
+	currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT
 }
 
