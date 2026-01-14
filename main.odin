@@ -653,10 +653,15 @@ createGraphicsPipeline :: proc(using app: ^HelloTriangleApplication) {
 		fragShaderStageCreateInfo,
 	}
 
+	bindingDescription := getBindingDescription(Vertex)
+	attributeDescription := getAttributeDescription(Vertex)
+
 	vertexInputInfo := vk.PipelineVertexInputStateCreateInfo {
 		sType                           = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-		vertexBindingDescriptionCount   = 0,
-		vertexAttributeDescriptionCount = 0,
+		vertexBindingDescriptionCount   = 1,
+		pVertexBindingDescriptions      = &bindingDescription,
+		vertexAttributeDescriptionCount = u32(len(attributeDescription)),
+		pVertexAttributeDescriptions    = raw_data(attributeDescription),
 	}
 
 	inputAssembly := vk.PipelineInputAssemblyStateCreateInfo {
@@ -942,4 +947,43 @@ drawFrame :: proc(using app: ^HelloTriangleApplication) {
 	vk.QueuePresentKHR(presentQueue, &presentInfo)
 	currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT
 }
+
+Vertex :: struct {
+	pos:   [2]f32,
+	color: [3]f32,
+}
+
+getBindingDescription :: proc($T: typeid) -> vk.VertexInputBindingDescription {
+	when T == Vertex {
+		bindingDescription := vk.VertexInputBindingDescription {
+			binding   = 0,
+			stride    = size_of(T),
+			inputRate = .VERTEX,
+		}
+		return bindingDescription
+	}
+	unimplemented()
+}
+
+getAttributeDescription :: proc($T: typeid) -> []vk.VertexInputAttributeDescription {
+	when T == Vertex {
+		attributeDescriptions := make([]vk.VertexInputAttributeDescription, 2)
+		attributeDescriptions[0] = {
+			binding  = 0,
+			location = 0,
+			format   = .R32G32_SFLOAT,
+			offset   = u32(offset_of(Vertex, pos)),
+		}
+		attributeDescriptions[1] = {
+			binding  = 0,
+			location = 1,
+			format   = .R32G32B32_SFLOAT,
+			offset   = u32(offset_of(Vertex, color)),
+		}
+		return attributeDescriptions
+	}
+	unimplemented()
+}
+
+vertices := [?]Vertex{{{0.0, -0.5}, {1, 0, 0}}, {{0.5, 0.5}, {0, 1, 0}}, {{-0.5, 0.5}, {0, 0, 1}}}
 
