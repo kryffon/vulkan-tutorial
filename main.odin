@@ -1003,37 +1003,119 @@ getAttributeDescription :: proc($T: typeid) -> []vk.VertexInputAttributeDescript
 	unimplemented()
 }
 
-vertices := [?]Vertex{{{0.0, -0.5}, {1, 0, 0}}, {{0.5, 0.5}, {0, 1, 0}}, {{-0.5, 0.5}, {0, 0, 1}}}
+// odinfmt:disable
+vertices := [?]Vertex{
+	{{0.0, -0.5}, {1, 0, 0}},
+	{{0.5, 0.5}, {0, 1, 0}},
+	{{-0.5, 0.5}, {0, 0, 1}},
+}
+// odinfmt:enable
 
 createVertexBuffer :: proc(using app: ^HelloTriangleApplication) {
+	bufferSize: vk.DeviceSize = size_of(vertices[0]) * len(vertices)
+
+	stagingBuffer: vk.Buffer
+	stagingBufferMemory: vk.DeviceMemory
+	createBuffer(
+		app,
+		bufferSize,
+		{.TRANSFER_SRC},
+		{.HOST_VISIBLE, .HOST_COHERENT},
+		&stagingBuffer,
+		&stagingBufferMemory,
+	)
+	{
+		data: rawptr
+		must(vk.MapMemory(device, stagingBufferMemory, 0, bufferSize, {}, &data))
+		intrinsics.mem_copy_non_overlapping(data, raw_data(vertices[:]), bufferSize)
+		vk.UnmapMemory(device, stagingBufferMemory)
+	}
+
+	createBuffer(
+		app,
+		bufferSize,
+		{.TRANSFER_DST, .VERTEX_BUFFER},
+		{.DEVICE_LOCAL},
+		&vertexBuffer,
+		&vertexBufferMemory,
+	)
+	copyBuffer(app, stagingBuffer, vertexBuffer, bufferSize)
+
+	vk.DestroyBuffer(device, stagingBuffer, nil)
+	vk.FreeMemory(device, stagingBufferMemory, nil)
+}
+
+createBuffer :: proc(
+	app: ^HelloTriangleApplication,
+	size: vk.DeviceSize,
+	usage: vk.BufferUsageFlags,
+	properties: vk.MemoryPropertyFlags,
+	buffer: ^vk.Buffer,
+	bufferMemory: ^vk.DeviceMemory,
+) {
 	bufferInfo := vk.BufferCreateInfo {
 		sType       = .BUFFER_CREATE_INFO,
 		size        = size_of(vertices[0]) * len(vertices),
-		usage       = {.VERTEX_BUFFER},
+		usage       = usage,
 		sharingMode = .EXCLUSIVE,
 	}
-	must(vk.CreateBuffer(device, &bufferInfo, nil, &vertexBuffer))
+	must(vk.CreateBuffer(app.device, &bufferInfo, nil, buffer))
 
 	memRequirements: vk.MemoryRequirements
-	vk.GetBufferMemoryRequirements(device, vertexBuffer, &memRequirements)
+	vk.GetBufferMemoryRequirements(app.device, buffer^, &memRequirements)
 
 	allocInfo := vk.MemoryAllocateInfo {
 		sType           = .MEMORY_ALLOCATE_INFO,
 		allocationSize  = memRequirements.size,
 		memoryTypeIndex = findMemoryType(
-			physicalDevce,
+			app.physicalDevce,
 			memRequirements.memoryTypeBits,
-			{.HOST_VISIBLE, .HOST_COHERENT},
+			properties,
 		),
 	}
-	must(vk.AllocateMemory(device, &allocInfo, nil, &vertexBufferMemory))
-	must(vk.BindBufferMemory(device, vertexBuffer, vertexBufferMemory, 0))
-	{
-		data: rawptr
-		vk.MapMemory(device, vertexBufferMemory, 0, bufferInfo.size, {}, &data)
-		intrinsics.mem_copy_non_overlapping(data, raw_data(vertices[:]), bufferInfo.size)
-		vk.UnmapMemory(device, vertexBufferMemory)
+	must(vk.AllocateMemory(app.device, &allocInfo, nil, bufferMemory))
+	must(vk.BindBufferMemory(app.device, buffer^, bufferMemory^, 0))
+}
+
+copyBuffer :: proc(
+	app: ^HelloTriangleApplication,
+	srcBuffer, dstBuffer: vk.Buffer,
+	size: vk.DeviceSize,
+) {
+	allocInfo := vk.CommandBufferAllocateInfo {
+		sType              = .COMMAND_BUFFER_ALLOCATE_INFO,
+		level              = .PRIMARY,
+		commandPool        = app.commandPool,
+		commandBufferCount = 1,
 	}
+
+	commandBuffer: vk.CommandBuffer
+	must(vk.AllocateCommandBuffers(app.device, &allocInfo, &commandBuffer))
+
+	beginInfo := vk.CommandBufferBeginInfo {
+		sType = .COMMAND_BUFFER_BEGIN_INFO,
+		flags = {.ONE_TIME_SUBMIT},
+	}
+
+	must(vk.BeginCommandBuffer(commandBuffer, &beginInfo))
+
+	copyRegion := vk.BufferCopy {
+		size = size,
+	}
+	vk.CmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion)
+
+	must(vk.EndCommandBuffer(commandBuffer))
+
+	submitInfo := vk.SubmitInfo {
+		sType              = .SUBMIT_INFO,
+		commandBufferCount = 1,
+		pCommandBuffers    = &commandBuffer,
+	}
+
+	must(vk.QueueSubmit(app.graphicsQueue, 1, &submitInfo, 0))
+	must(vk.QueueWaitIdle(app.graphicsQueue))
+
+	vk.FreeCommandBuffers(app.device, app.commandPool, 1, &commandBuffer)
 }
 
 findMemoryType :: proc(
