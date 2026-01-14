@@ -1,5 +1,6 @@
 package main
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:fmt"
 import "core:log"
@@ -81,6 +82,8 @@ HelloTriangleApplication :: struct {
 	pipelineLayout:           vk.PipelineLayout,
 	graphicsPipeline:         vk.Pipeline,
 	commandPool:              vk.CommandPool,
+	vertexBuffer:             vk.Buffer,
+	vertexBufferMemory:       vk.DeviceMemory,
 	commandBuffers:           []vk.CommandBuffer,
 	imageAvailableSemaphores: []vk.Semaphore,
 	renderFinishedSemaphores: []vk.Semaphore,
@@ -132,6 +135,7 @@ initVulkan :: proc(using app: ^HelloTriangleApplication) {
 	createGraphicsPipeline(app)
 	createFramebuffers(app)
 	createCommandPool(app)
+	createVertexBuffer(app)
 	createCommandBuffers(app)
 	createSyncObjects(app)
 }
@@ -163,6 +167,8 @@ cleanupSwapChain :: proc(using app: ^HelloTriangleApplication) {
 
 cleanup :: proc(using app: ^HelloTriangleApplication) {
 	cleanupSwapChain(app)
+	vk.DestroyBuffer(device, vertexBuffer, nil)
+	vk.FreeMemory(device, vertexBufferMemory, nil)
 	for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
 		vk.DestroySemaphore(device, renderFinishedSemaphores[i], nil)
 		vk.DestroySemaphore(device, imageAvailableSemaphores[i], nil)
@@ -655,6 +661,7 @@ createGraphicsPipeline :: proc(using app: ^HelloTriangleApplication) {
 
 	bindingDescription := getBindingDescription(Vertex)
 	attributeDescription := getAttributeDescription(Vertex)
+	defer delete(attributeDescription)
 
 	vertexInputInfo := vk.PipelineVertexInputStateCreateInfo {
 		sType                           = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -867,9 +874,20 @@ createCommandBuffers :: proc(using app: ^HelloTriangleApplication) {
 		}
 
 		vk.CmdBeginRenderPass(commandBuffers[i], &renderPassInfo, .INLINE)
-		vk.CmdBindPipeline(commandBuffers[i], .GRAPHICS, graphicsPipeline)
 		{
-			vk.CmdDraw(commandBuffers[i], 3, 1, 0, 0)
+			vk.CmdBindPipeline(commandBuffers[i], .GRAPHICS, graphicsPipeline)
+
+			vertexBuffers := [?]vk.Buffer{vertexBuffer}
+			offsets := [?]vk.DeviceSize{0}
+			vk.CmdBindVertexBuffers(
+				commandBuffers[i],
+				0,
+				1,
+				raw_data(vertexBuffers[:]),
+				raw_data(offsets[:]),
+			)
+
+			vk.CmdDraw(commandBuffers[i], u32(len(vertices)), 1, 0, 0)
 		}
 		vk.CmdEndRenderPass(commandBuffers[i])
 		must(vk.EndCommandBuffer(commandBuffers[i]))
@@ -986,4 +1004,54 @@ getAttributeDescription :: proc($T: typeid) -> []vk.VertexInputAttributeDescript
 }
 
 vertices := [?]Vertex{{{0.0, -0.5}, {1, 0, 0}}, {{0.5, 0.5}, {0, 1, 0}}, {{-0.5, 0.5}, {0, 0, 1}}}
+
+createVertexBuffer :: proc(using app: ^HelloTriangleApplication) {
+	bufferInfo := vk.BufferCreateInfo {
+		sType       = .BUFFER_CREATE_INFO,
+		size        = size_of(vertices[0]) * len(vertices),
+		usage       = {.VERTEX_BUFFER},
+		sharingMode = .EXCLUSIVE,
+	}
+	must(vk.CreateBuffer(device, &bufferInfo, nil, &vertexBuffer))
+
+	memRequirements: vk.MemoryRequirements
+	vk.GetBufferMemoryRequirements(device, vertexBuffer, &memRequirements)
+
+	allocInfo := vk.MemoryAllocateInfo {
+		sType           = .MEMORY_ALLOCATE_INFO,
+		allocationSize  = memRequirements.size,
+		memoryTypeIndex = findMemoryType(
+			physicalDevce,
+			memRequirements.memoryTypeBits,
+			{.HOST_VISIBLE, .HOST_COHERENT},
+		),
+	}
+	must(vk.AllocateMemory(device, &allocInfo, nil, &vertexBufferMemory))
+	must(vk.BindBufferMemory(device, vertexBuffer, vertexBufferMemory, 0))
+	{
+		data: rawptr
+		vk.MapMemory(device, vertexBufferMemory, 0, bufferInfo.size, {}, &data)
+		intrinsics.mem_copy_non_overlapping(data, raw_data(vertices[:]), bufferInfo.size)
+		vk.UnmapMemory(device, vertexBufferMemory)
+	}
+}
+
+findMemoryType :: proc(
+	physicalDevice: vk.PhysicalDevice,
+	typeFilter: u32,
+	properties: vk.MemoryPropertyFlags,
+) -> u32 {
+	memProperties: vk.PhysicalDeviceMemoryProperties
+	vk.GetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties)
+
+	for i in 0 ..< memProperties.memoryTypeCount {
+		if (typeFilter & (1 << i)) > 0 {
+			if properties <= memProperties.memoryTypes[i].propertyFlags {
+				return i
+			}
+		}
+	}
+	assert(false, "failed to find suitable memory type!")
+	return 0
+}
 
