@@ -84,6 +84,8 @@ HelloTriangleApplication :: struct {
 	commandPool:              vk.CommandPool,
 	vertexBuffer:             vk.Buffer,
 	vertexBufferMemory:       vk.DeviceMemory,
+	indexBuffer:              vk.Buffer,
+	indexBufferMemory:        vk.DeviceMemory,
 	commandBuffers:           []vk.CommandBuffer,
 	imageAvailableSemaphores: []vk.Semaphore,
 	renderFinishedSemaphores: []vk.Semaphore,
@@ -136,6 +138,7 @@ initVulkan :: proc(using app: ^HelloTriangleApplication) {
 	createFramebuffers(app)
 	createCommandPool(app)
 	createVertexBuffer(app)
+	createIndexBuffer(app)
 	createCommandBuffers(app)
 	createSyncObjects(app)
 }
@@ -167,6 +170,8 @@ cleanupSwapChain :: proc(using app: ^HelloTriangleApplication) {
 
 cleanup :: proc(using app: ^HelloTriangleApplication) {
 	cleanupSwapChain(app)
+	vk.DestroyBuffer(device, indexBuffer, nil)
+	vk.FreeMemory(device, indexBufferMemory, nil)
 	vk.DestroyBuffer(device, vertexBuffer, nil)
 	vk.FreeMemory(device, vertexBufferMemory, nil)
 	for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
@@ -887,7 +892,8 @@ createCommandBuffers :: proc(using app: ^HelloTriangleApplication) {
 				raw_data(offsets[:]),
 			)
 
-			vk.CmdDraw(commandBuffers[i], u32(len(vertices)), 1, 0, 0)
+			vk.CmdBindIndexBuffer(commandBuffers[i], indexBuffer, 0, .UINT16)
+			vk.CmdDrawIndexed(commandBuffers[i], u32(len(indices)), 1, 0, 0, 0)
 		}
 		vk.CmdEndRenderPass(commandBuffers[i])
 		must(vk.EndCommandBuffer(commandBuffers[i]))
@@ -1005,10 +1011,13 @@ getAttributeDescription :: proc($T: typeid) -> []vk.VertexInputAttributeDescript
 
 // odinfmt:disable
 vertices := [?]Vertex{
-	{{0.0, -0.5}, {1, 0, 0}},
-	{{0.5, 0.5}, {0, 1, 0}},
-	{{-0.5, 0.5}, {0, 0, 1}},
+	{{-0.5, -0.5}, {1, 0, 0}},
+	{{0.5, -0.5}, {0, 1, 0}},
+	{{0.5, 0.5}, {0, 0, 1}},
+	{{-0.5, 0.5}, {1, 1, 1}},
 }
+
+indices := [?]u16{0,1,2,2,3,0}
 // odinfmt:enable
 
 createVertexBuffer :: proc(using app: ^HelloTriangleApplication) {
@@ -1135,5 +1144,38 @@ findMemoryType :: proc(
 	}
 	assert(false, "failed to find suitable memory type!")
 	return 0
+}
+
+createIndexBuffer :: proc(using app: ^HelloTriangleApplication) {
+	bufferSize: vk.DeviceSize = size_of(indices[0]) * len(indices)
+
+	stagingBuffer: vk.Buffer
+	stagingBufferMemory: vk.DeviceMemory
+	createBuffer(
+		app,
+		bufferSize,
+		{.TRANSFER_SRC},
+		{.HOST_VISIBLE, .HOST_COHERENT},
+		&stagingBuffer,
+		&stagingBufferMemory,
+	)
+	{
+		data: rawptr
+		must(vk.MapMemory(device, stagingBufferMemory, 0, bufferSize, {}, &data))
+		intrinsics.mem_copy_non_overlapping(data, raw_data(indices[:]), bufferSize)
+		vk.UnmapMemory(device, stagingBufferMemory)
+	}
+
+	createBuffer(
+		app,
+		bufferSize,
+		{.TRANSFER_DST, .INDEX_BUFFER},
+		{.DEVICE_LOCAL},
+		&indexBuffer,
+		&indexBufferMemory,
+	)
+	copyBuffer(app, stagingBuffer, indexBuffer, bufferSize)
+	vk.DestroyBuffer(device, stagingBuffer, nil)
+	vk.FreeMemory(device, stagingBufferMemory, nil)
 }
 
