@@ -100,6 +100,7 @@ HelloTriangleApplication :: struct {
 	indexBufferMemory:        vk.DeviceMemory,
 	uniformBuffers:           []vk.Buffer,
 	uniformBuffersMemory:     []vk.DeviceMemory,
+	uniformBuffersMapped:     []rawptr,
 	commandBuffers:           []vk.CommandBuffer,
 
 	// sync objects
@@ -232,6 +233,7 @@ cleanup :: proc(using app: ^HelloTriangleApplication) {
 	delete(imagesInFlight)
 	delete(uniformBuffers)
 	delete(uniformBuffersMemory)
+	delete(uniformBuffersMapped)
 	delete(descriptorSets)
 }
 
@@ -308,7 +310,8 @@ createInstance :: proc(using app: ^HelloTriangleApplication) {
 populateDebugMessengerCreateInfo :: proc(createInfo: ^vk.DebugUtilsMessengerCreateInfoEXT) {
 	createInfo.sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT
 	createInfo.messageSeverity = {.VERBOSE, .INFO, .WARNING, .ERROR}
-	createInfo.messageType = {.GENERAL, .VALIDATION, .PERFORMANCE}
+	// createInfo.messageType = {.GENERAL, .VALIDATION, .PERFORMANCE}
+	createInfo.messageType = {.VALIDATION, .PERFORMANCE}
 	createInfo.pfnUserCallback = debugCallback
 }
 
@@ -387,7 +390,7 @@ debugCallback :: proc "system" (
 		strings.write_string(&b, fmt.tprintf("%v", t))
 		first = true
 	}
-	log.logf(level, "VULKAN: [%s]: %s", strings.to_string(b), pCallbackData.pMessage)
+	log.logf(level, "VULKAN: [%s]: %s\n", strings.to_string(b), pCallbackData.pMessage)
 	return false
 }
 
@@ -1260,6 +1263,7 @@ createUniformBuffers :: proc(using app: ^HelloTriangleApplication) {
 	bufferSize: vk.DeviceSize = size_of(UniformBufferObject)
 	uniformBuffers = make([]vk.Buffer, len(swapChainImages))
 	uniformBuffersMemory = make([]vk.DeviceMemory, len(swapChainImages))
+	uniformBuffersMapped = make([]rawptr, len(swapChainImages))
 
 	for i in 0 ..< len(swapChainImages) {
 		createBuffer(
@@ -1269,6 +1273,16 @@ createUniformBuffers :: proc(using app: ^HelloTriangleApplication) {
 			{.HOST_VISIBLE, .HOST_COHERENT},
 			&uniformBuffers[i],
 			&uniformBuffersMemory[i],
+		)
+		must(
+			vk.MapMemory(
+				device,
+				uniformBuffersMemory[i],
+				0,
+				bufferSize,
+				{},
+				&uniformBuffersMapped[i],
+			),
 		)
 	}
 }
@@ -1287,19 +1301,7 @@ updateUniformBuffer :: proc(app: ^HelloTriangleApplication, currentImage: u32) {
 	// glsl is for OpenGL, so flip y axis scale for vulkan
 	ubo.proj[1][1] *= -1
 
-	data: rawptr
-	must(
-		vk.MapMemory(
-			app.device,
-			app.uniformBuffersMemory[currentImage],
-			0,
-			size_of(ubo),
-			{},
-			&data,
-		),
-	)
-	intrinsics.mem_copy_non_overlapping(data, &ubo, size_of(ubo))
-	vk.UnmapMemory(app.device, app.uniformBuffersMemory[currentImage])
+	intrinsics.mem_copy_non_overlapping(app.uniformBuffersMapped[currentImage], &ubo, size_of(ubo))
 }
 
 createDescriptorPool :: proc(using app: ^HelloTriangleApplication) {
