@@ -87,6 +87,8 @@ HelloTriangleApplication :: struct {
 	// renderpass and pipeline
 	renderPass:               vk.RenderPass,
 	descriptorSetLayout:      vk.DescriptorSetLayout,
+	descriptorPool:           vk.DescriptorPool,
+	descriptorSets:           []vk.DescriptorSet,
 	pipelineLayout:           vk.PipelineLayout,
 	graphicsPipeline:         vk.Pipeline,
 	commandPool:              vk.CommandPool,
@@ -107,6 +109,9 @@ HelloTriangleApplication :: struct {
 	imagesInFlight:           []vk.Fence,
 	currentFrame:             int,
 	framebufferResized:       bool,
+
+	// game objects
+	startTime:                time.Tick,
 }
 
 run :: proc(using app: ^HelloTriangleApplication) {
@@ -155,11 +160,14 @@ initVulkan :: proc(using app: ^HelloTriangleApplication) {
 	createVertexBuffer(app)
 	createIndexBuffer(app)
 	createUniformBuffers(app)
+	createDescriptorPool(app)
+	createDescriptorSets(app)
 	createCommandBuffers(app)
 	createSyncObjects(app)
 }
 
 mainLoop :: proc(using app: ^HelloTriangleApplication) {
+	startTime = time.tick_now()
 	for !glfw.WindowShouldClose(window) {
 		glfw.PollEvents()
 		if glfw.GetKey(window, glfw.KEY_ESCAPE) == glfw.PRESS {
@@ -187,6 +195,7 @@ cleanupSwapChain :: proc(using app: ^HelloTriangleApplication) {
 		vk.DestroyBuffer(device, uniformBuffers[i], nil)
 		vk.FreeMemory(device, uniformBuffersMemory[i], nil)
 	}
+	vk.DestroyDescriptorPool(device, descriptorPool, nil)
 }
 
 cleanup :: proc(using app: ^HelloTriangleApplication) {
@@ -223,6 +232,7 @@ cleanup :: proc(using app: ^HelloTriangleApplication) {
 	delete(imagesInFlight)
 	delete(uniformBuffers)
 	delete(uniformBuffersMemory)
+	delete(descriptorSets)
 }
 
 recreateSwapChain :: proc(using app: ^HelloTriangleApplication) {
@@ -240,6 +250,8 @@ recreateSwapChain :: proc(using app: ^HelloTriangleApplication) {
 	createGraphicsPipeline(app)
 	createFramebuffers(app)
 	createUniformBuffers(app)
+	createDescriptorPool(app)
+	createDescriptorSets(app)
 	createCommandBuffers(app)
 
 	// reserve(&imagesInFlight, len(swapChainImages))
@@ -738,7 +750,7 @@ createGraphicsPipeline :: proc(using app: ^HelloTriangleApplication) {
 		polygonMode             = .FILL,
 		lineWidth               = 1.0,
 		cullMode                = {.BACK},
-		frontFace               = .CLOCKWISE,
+		frontFace               = .COUNTER_CLOCKWISE,
 		depthBiasEnable         = false,
 	}
 
@@ -921,6 +933,16 @@ createCommandBuffers :: proc(using app: ^HelloTriangleApplication) {
 			)
 
 			vk.CmdBindIndexBuffer(commandBuffers[i], indexBuffer, 0, .UINT16)
+			vk.CmdBindDescriptorSets(
+				commandBuffers[i],
+				.GRAPHICS,
+				pipelineLayout,
+				0,
+				1,
+				&descriptorSets[i],
+				0,
+				nil,
+			)
 			vk.CmdDrawIndexed(commandBuffers[i], u32(len(indices)), 1, 0, 0, 0)
 		}
 		vk.CmdEndRenderPass(commandBuffers[i])
@@ -1251,8 +1273,7 @@ createUniformBuffers :: proc(using app: ^HelloTriangleApplication) {
 }
 
 updateUniformBuffer :: proc(app: ^HelloTriangleApplication, currentImage: u32) {
-	@(static) startTime: time.Tick
-	startTime = time.tick_now()
+	startTime := app.startTime
 
 	currentTime := time.tick_now()
 	duration := f32(time.duration_seconds(time.tick_diff(startTime, currentTime)))
@@ -1278,5 +1299,53 @@ updateUniformBuffer :: proc(app: ^HelloTriangleApplication, currentImage: u32) {
 	)
 	intrinsics.mem_copy_non_overlapping(data, &ubo, size_of(ubo))
 	vk.UnmapMemory(app.device, app.uniformBuffersMemory[currentImage])
+}
+
+createDescriptorPool :: proc(using app: ^HelloTriangleApplication) {
+	poolSize := vk.DescriptorPoolSize {
+		type            = .UNIFORM_BUFFER,
+		descriptorCount = u32(len(swapChainImages)),
+	}
+	poolInfo := vk.DescriptorPoolCreateInfo {
+		sType         = .DESCRIPTOR_POOL_CREATE_INFO,
+		poolSizeCount = 1,
+		pPoolSizes    = &poolSize,
+		maxSets       = u32(len(swapChainImages)),
+	}
+	must(vk.CreateDescriptorPool(device, &poolInfo, nil, &descriptorPool))
+}
+
+createDescriptorSets :: proc(using app: ^HelloTriangleApplication) {
+	layouts := make([]vk.DescriptorSetLayout, len(swapChainImages))
+	defer delete(layouts)
+	for _, i in layouts do layouts[i] = descriptorSetLayout
+
+	allocInfo := vk.DescriptorSetAllocateInfo {
+		sType              = .DESCRIPTOR_SET_ALLOCATE_INFO,
+		descriptorPool     = descriptorPool,
+		descriptorSetCount = u32(len(swapChainImages)),
+		pSetLayouts        = raw_data(layouts),
+	}
+
+	descriptorSets = make([]vk.DescriptorSet, len(swapChainImages))
+	must(vk.AllocateDescriptorSets(device, &allocInfo, raw_data(descriptorSets)))
+
+	for i in 0 ..< len(swapChainImages) {
+		bufferInfo := vk.DescriptorBufferInfo {
+			buffer = uniformBuffers[i],
+			offset = 0,
+			range  = size_of(UniformBufferObject),
+		}
+		descriptorWrite := vk.WriteDescriptorSet {
+			sType           = .WRITE_DESCRIPTOR_SET,
+			dstSet          = descriptorSets[i],
+			dstBinding      = 0,
+			dstArrayElement = 0,
+			descriptorType  = .UNIFORM_BUFFER,
+			descriptorCount = 1,
+			pBufferInfo     = &bufferInfo,
+		}
+		vk.UpdateDescriptorSets(device, 1, &descriptorWrite, 0, nil)
+	}
 }
 
