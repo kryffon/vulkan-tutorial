@@ -5,10 +5,12 @@ import "base:runtime"
 import "core:fmt"
 import "core:log"
 import "core:math/bits"
+import "core:math/linalg/glsl"
 import "core:mem"
 import "core:os"
 import "core:slice"
 import "core:strings"
+import "core:time"
 import "vendor:glfw"
 import vk "vendor:vulkan"
 
@@ -64,12 +66,15 @@ main :: proc() {
 }
 
 HelloTriangleApplication :: struct {
+	// instance
 	window:                   glfw.WindowHandle,
 	instance:                 vk.Instance,
 	debugMessenger:           vk.DebugUtilsMessengerEXT,
 	surface:                  vk.SurfaceKHR,
 	physicalDevce:            vk.PhysicalDevice,
 	device:                   vk.Device,
+
+	// queues and swapchains
 	graphicsQueue:            vk.Queue,
 	presentQueue:             vk.Queue,
 	swapChain:                vk.SwapchainKHR,
@@ -78,15 +83,24 @@ HelloTriangleApplication :: struct {
 	swapChainExtent:          vk.Extent2D,
 	swapChainImageViews:      []vk.ImageView,
 	swapChainFramebuffers:    []vk.Framebuffer,
+
+	// renderpass and pipeline
 	renderPass:               vk.RenderPass,
+	descriptorSetLayout:      vk.DescriptorSetLayout,
 	pipelineLayout:           vk.PipelineLayout,
 	graphicsPipeline:         vk.Pipeline,
 	commandPool:              vk.CommandPool,
+
+	// buffers
 	vertexBuffer:             vk.Buffer,
 	vertexBufferMemory:       vk.DeviceMemory,
 	indexBuffer:              vk.Buffer,
 	indexBufferMemory:        vk.DeviceMemory,
+	uniformBuffers:           []vk.Buffer,
+	uniformBuffersMemory:     []vk.DeviceMemory,
 	commandBuffers:           []vk.CommandBuffer,
+
+	// sync objects
 	imageAvailableSemaphores: []vk.Semaphore,
 	renderFinishedSemaphores: []vk.Semaphore,
 	inFlightFences:           []vk.Fence,
@@ -134,11 +148,13 @@ initVulkan :: proc(using app: ^HelloTriangleApplication) {
 	createSwapChain(app)
 	createImageViews(app)
 	createRenderPass(app)
+	createDescriptorSetLayout(app)
 	createGraphicsPipeline(app)
 	createFramebuffers(app)
 	createCommandPool(app)
 	createVertexBuffer(app)
 	createIndexBuffer(app)
+	createUniformBuffers(app)
 	createCommandBuffers(app)
 	createSyncObjects(app)
 }
@@ -166,10 +182,17 @@ cleanupSwapChain :: proc(using app: ^HelloTriangleApplication) {
 		vk.DestroyImageView(device, imageView, nil)
 	}
 	vk.DestroySwapchainKHR(device, swapChain, nil)
+
+	for i in 0 ..< len(swapChainImages) {
+		vk.DestroyBuffer(device, uniformBuffers[i], nil)
+		vk.FreeMemory(device, uniformBuffersMemory[i], nil)
+	}
 }
 
 cleanup :: proc(using app: ^HelloTriangleApplication) {
 	cleanupSwapChain(app)
+	vk.DestroyDescriptorSetLayout(device, descriptorSetLayout, nil)
+
 	vk.DestroyBuffer(device, indexBuffer, nil)
 	vk.FreeMemory(device, indexBufferMemory, nil)
 	vk.DestroyBuffer(device, vertexBuffer, nil)
@@ -198,6 +221,8 @@ cleanup :: proc(using app: ^HelloTriangleApplication) {
 	delete(imageAvailableSemaphores)
 	delete(inFlightFences)
 	delete(imagesInFlight)
+	delete(uniformBuffers)
+	delete(uniformBuffersMemory)
 }
 
 recreateSwapChain :: proc(using app: ^HelloTriangleApplication) {
@@ -214,6 +239,7 @@ recreateSwapChain :: proc(using app: ^HelloTriangleApplication) {
 	createRenderPass(app)
 	createGraphicsPipeline(app)
 	createFramebuffers(app)
+	createUniformBuffers(app)
 	createCommandBuffers(app)
 
 	// reserve(&imagesInFlight, len(swapChainImages))
@@ -384,9 +410,10 @@ pickPhysicalDevice :: proc(using app: ^HelloTriangleApplication) {
 }
 
 isDeviceSuitable :: proc(surface: vk.SurfaceKHR, device: vk.PhysicalDevice) -> bool {
-	// props: vk.PhysicalDeviceProperties
-	// vk.GetPhysicalDeviceProperties(device, &props)
-	// log.debugf("VULKAN: device: %s type:%v", props.deviceName, props.deviceType)
+	props: vk.PhysicalDeviceProperties
+	vk.GetPhysicalDeviceProperties(device, &props)
+	log.debugf("VULKAN: device: %s type:%v", props.deviceName, props.deviceType)
+	if props.deviceType != .DISCRETE_GPU do return false
 	indices := findQueueFamilies(surface, device)
 	return isComplete(indices)
 }
@@ -736,9 +763,10 @@ createGraphicsPipeline :: proc(using app: ^HelloTriangleApplication) {
 	}
 
 	pipelineLayoutInfo := vk.PipelineLayoutCreateInfo {
-		sType                  = .PIPELINE_LAYOUT_CREATE_INFO,
-		setLayoutCount         = 0,
-		pushConstantRangeCount = 0,
+		sType          = .PIPELINE_LAYOUT_CREATE_INFO,
+		setLayoutCount = 1,
+		pSetLayouts    = &descriptorSetLayout,
+		// pushConstantRangeCount = 0,
 	}
 
 	must(vk.CreatePipelineLayout(device, &pipelineLayoutInfo, nil, &pipelineLayout))
@@ -925,8 +953,7 @@ drawFrame :: proc(using app: ^HelloTriangleApplication) {
 	must(vk.WaitForFences(device, 1, raw_data(inFlightFences), true, bits.U64_MAX))
 
 	imageIndex: u32
-	// must(
-	vk.AcquireNextImageKHR(
+	result := vk.AcquireNextImageKHR(
 		device,
 		swapChain,
 		bits.U64_MAX,
@@ -934,7 +961,14 @@ drawFrame :: proc(using app: ^HelloTriangleApplication) {
 		0,
 		&imageIndex,
 	)
-	// )
+	if result == .ERROR_OUT_OF_DATE_KHR {
+		recreateSwapChain(app)
+		return
+	} else if result != .SUCCESS && result != .SUBOPTIMAL_KHR {
+		assert(false, "failed to acquire swap chain image!")
+	}
+
+	updateUniformBuffer(app, imageIndex)
 
 	if imagesInFlight[imageIndex] != 0 {
 		must(vk.WaitForFences(device, 1, &imagesInFlight[imageIndex], true, bits.U64_MAX))
@@ -1007,6 +1041,10 @@ getAttributeDescription :: proc($T: typeid) -> []vk.VertexInputAttributeDescript
 		return attributeDescriptions
 	}
 	unimplemented()
+}
+
+UniformBufferObject :: struct {
+	model, view, proj: glsl.mat4,
 }
 
 // odinfmt:disable
@@ -1177,5 +1215,68 @@ createIndexBuffer :: proc(using app: ^HelloTriangleApplication) {
 	copyBuffer(app, stagingBuffer, indexBuffer, bufferSize)
 	vk.DestroyBuffer(device, stagingBuffer, nil)
 	vk.FreeMemory(device, stagingBufferMemory, nil)
+}
+
+createDescriptorSetLayout :: proc(using app: ^HelloTriangleApplication) {
+	uboLayoutBinding := vk.DescriptorSetLayoutBinding {
+		binding            = 0,
+		descriptorCount    = 1,
+		descriptorType     = .UNIFORM_BUFFER,
+		pImmutableSamplers = nil,
+		stageFlags         = {.VERTEX},
+	}
+	layoutInfo := vk.DescriptorSetLayoutCreateInfo {
+		sType        = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+		bindingCount = 1,
+		pBindings    = &uboLayoutBinding,
+	}
+	must(vk.CreateDescriptorSetLayout(device, &layoutInfo, nil, &descriptorSetLayout))
+}
+
+createUniformBuffers :: proc(using app: ^HelloTriangleApplication) {
+	bufferSize: vk.DeviceSize = size_of(UniformBufferObject)
+	uniformBuffers = make([]vk.Buffer, len(swapChainImages))
+	uniformBuffersMemory = make([]vk.DeviceMemory, len(swapChainImages))
+
+	for i in 0 ..< len(swapChainImages) {
+		createBuffer(
+			app,
+			bufferSize,
+			{.UNIFORM_BUFFER},
+			{.HOST_VISIBLE, .HOST_COHERENT},
+			&uniformBuffers[i],
+			&uniformBuffersMemory[i],
+		)
+	}
+}
+
+updateUniformBuffer :: proc(app: ^HelloTriangleApplication, currentImage: u32) {
+	@(static) startTime: time.Tick
+	startTime = time.tick_now()
+
+	currentTime := time.tick_now()
+	duration := f32(time.duration_seconds(time.tick_diff(startTime, currentTime)))
+	ubo: UniformBufferObject
+	ubo.model = glsl.mat4Rotate({0, 0, 1}, glsl.radians_f32(90) * duration)
+	ubo.view = glsl.mat4LookAt({2, 2, 2}, {0, 0, 0}, {0, 0, 1})
+	aspect := f32(app.swapChainExtent.width) / f32(app.swapChainExtent.height)
+	ubo.proj = glsl.mat4Perspective(glsl.radians_f32(45), aspect, 0.1, 10)
+
+	// glsl is for OpenGL, so flip y axis scale for vulkan
+	ubo.proj[1][1] *= -1
+
+	data: rawptr
+	must(
+		vk.MapMemory(
+			app.device,
+			app.uniformBuffersMemory[currentImage],
+			0,
+			size_of(ubo),
+			{},
+			&data,
+		),
+	)
+	intrinsics.mem_copy_non_overlapping(data, &ubo, size_of(ubo))
+	vk.UnmapMemory(app.device, app.uniformBuffersMemory[currentImage])
 }
 
