@@ -1065,7 +1065,8 @@ getAttributeDescription :: proc($T: typeid) -> []vk.VertexInputAttributeDescript
 	unimplemented()
 }
 
-UniformBufferObject :: struct {
+
+UniformBufferObject :: struct #align (16) {
 	model, view, proj: glsl.mat4,
 }
 
