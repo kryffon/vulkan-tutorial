@@ -3,6 +3,7 @@ package main
 import "base:intrinsics"
 import "base:runtime"
 import "core:fmt"
+import "core:image/jpeg"
 import "core:log"
 import "core:math/bits"
 import "core:math/linalg/glsl"
@@ -12,7 +13,6 @@ import "core:slice"
 import "core:strings"
 import "core:time"
 import "vendor:glfw"
-import stbi "vendor:stb/image"
 import vk "vendor:vulkan"
 
 g_context: runtime.Context
@@ -118,6 +118,7 @@ HelloTriangleApplication :: struct {
 
 	// game objects
 	startTime:                time.Tick,
+	frameCounter:             i64,
 }
 
 run :: proc(using app: ^HelloTriangleApplication) {
@@ -183,6 +184,7 @@ mainLoop :: proc(using app: ^HelloTriangleApplication) {
 			glfw.SetWindowShouldClose(window, true)
 		}
 		drawFrame(app)
+		frameCounter += 1
 	}
 	must(vk.DeviceWaitIdle(device))
 }
@@ -247,6 +249,7 @@ cleanup :: proc(using app: ^HelloTriangleApplication) {
 	delete(uniformBuffersMemory)
 	delete(uniformBuffersMapped)
 	delete(descriptorSets)
+	log.debugf("TOTAL_FRAMES: %v", frameCounter)
 }
 
 recreateSwapChain :: proc(using app: ^HelloTriangleApplication) {
@@ -1026,8 +1029,9 @@ drawFrame :: proc(using app: ^HelloTriangleApplication) {
 }
 
 Vertex :: struct {
-	pos:   [2]f32,
-	color: [3]f32,
+	pos:      [2]f32,
+	color:    [3]f32,
+	texCoord: [2]f32,
 }
 
 getBindingDescription :: proc($T: typeid) -> vk.VertexInputBindingDescription {
@@ -1044,7 +1048,7 @@ getBindingDescription :: proc($T: typeid) -> vk.VertexInputBindingDescription {
 
 getAttributeDescription :: proc($T: typeid) -> []vk.VertexInputAttributeDescription {
 	when T == Vertex {
-		attributeDescriptions := make([]vk.VertexInputAttributeDescription, 2)
+		attributeDescriptions := make([]vk.VertexInputAttributeDescription, 3)
 		attributeDescriptions[0] = {
 			binding  = 0,
 			location = 0,
@@ -1056,6 +1060,12 @@ getAttributeDescription :: proc($T: typeid) -> []vk.VertexInputAttributeDescript
 			location = 1,
 			format   = .R32G32B32_SFLOAT,
 			offset   = u32(offset_of(Vertex, color)),
+		}
+		attributeDescriptions[2] = {
+			binding  = 0,
+			location = 2,
+			format   = .R32G32_SFLOAT,
+			offset   = u32(offset_of(Vertex, texCoord)),
 		}
 		return attributeDescriptions
 	}
@@ -1069,10 +1079,10 @@ UniformBufferObject :: struct #align (16) {
 
 // odinfmt:disable
 vertices := [?]Vertex{
-	{{-0.5, -0.5}, {1, 0, 0}},
-	{{0.5, -0.5}, {0, 1, 0}},
-	{{0.5, 0.5}, {0, 0, 1}},
-	{{-0.5, 0.5}, {1, 1, 1}},
+	{{-0.5, -0.5}, {1, 0, 0}, {1, 0}},
+	{{ 0.5, -0.5}, {0, 1, 0}, {0, 0}},
+	{{ 0.5,  0.5}, {0, 0, 1}, {0, 1}},
+	{{-0.5,  0.5}, {1, 1, 1}, {1, 1}},
 }
 
 indices := [?]u16{0,1,2,2,3,0}
@@ -1122,7 +1132,7 @@ createBuffer :: proc(
 ) {
 	bufferInfo := vk.BufferCreateInfo {
 		sType       = .BUFFER_CREATE_INFO,
-		size        = size_of(vertices[0]) * len(vertices),
+		size        = size,
 		usage       = usage,
 		sharingMode = .EXCLUSIVE,
 	}
@@ -1252,10 +1262,18 @@ createDescriptorSetLayout :: proc(using app: ^HelloTriangleApplication) {
 		pImmutableSamplers = nil,
 		stageFlags         = {.VERTEX},
 	}
+	samplerLayoutBinding := vk.DescriptorSetLayoutBinding {
+		binding            = 1,
+		descriptorCount    = 1,
+		descriptorType     = .COMBINED_IMAGE_SAMPLER,
+		pImmutableSamplers = nil,
+		stageFlags         = {.FRAGMENT},
+	}
+	bindings := [?]vk.DescriptorSetLayoutBinding{uboLayoutBinding, samplerLayoutBinding}
 	layoutInfo := vk.DescriptorSetLayoutCreateInfo {
 		sType        = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-		bindingCount = 1,
-		pBindings    = &uboLayoutBinding,
+		bindingCount = u32(len(bindings)),
+		pBindings    = raw_data(bindings[:]),
 	}
 	must(vk.CreateDescriptorSetLayout(device, &layoutInfo, nil, &descriptorSetLayout))
 }
@@ -1306,14 +1324,14 @@ updateUniformBuffer :: proc(app: ^HelloTriangleApplication, currentImage: u32) {
 }
 
 createDescriptorPool :: proc(using app: ^HelloTriangleApplication) {
-	poolSize := vk.DescriptorPoolSize {
-		type            = .UNIFORM_BUFFER,
-		descriptorCount = u32(len(swapChainImages)),
+	poolSizes := [?]vk.DescriptorPoolSize {
+		{type = .UNIFORM_BUFFER, descriptorCount = u32(len(swapChainImages))},
+		{type = .COMBINED_IMAGE_SAMPLER, descriptorCount = u32(len(swapChainImages))},
 	}
 	poolInfo := vk.DescriptorPoolCreateInfo {
 		sType         = .DESCRIPTOR_POOL_CREATE_INFO,
-		poolSizeCount = 1,
-		pPoolSizes    = &poolSize,
+		poolSizeCount = u32(len(poolSizes)),
+		pPoolSizes    = raw_data(poolSizes[:]),
 		maxSets       = u32(len(swapChainImages)),
 	}
 	must(vk.CreateDescriptorPool(device, &poolInfo, nil, &descriptorPool))
@@ -1340,32 +1358,56 @@ createDescriptorSets :: proc(using app: ^HelloTriangleApplication) {
 			offset = 0,
 			range  = size_of(UniformBufferObject),
 		}
-		descriptorWrite := vk.WriteDescriptorSet {
-			sType           = .WRITE_DESCRIPTOR_SET,
-			dstSet          = descriptorSets[i],
-			dstBinding      = 0,
-			dstArrayElement = 0,
-			descriptorType  = .UNIFORM_BUFFER,
-			descriptorCount = 1,
-			pBufferInfo     = &bufferInfo,
+		imageInfo := vk.DescriptorImageInfo {
+			imageLayout = .SHADER_READ_ONLY_OPTIMAL,
+			imageView   = textureImageView,
+			sampler     = textureSampler,
 		}
-		vk.UpdateDescriptorSets(device, 1, &descriptorWrite, 0, nil)
+		descriptorWrites := [?]vk.WriteDescriptorSet {
+			{
+				sType = .WRITE_DESCRIPTOR_SET,
+				dstSet = descriptorSets[i],
+				dstBinding = 0,
+				dstArrayElement = 0,
+				descriptorType = .UNIFORM_BUFFER,
+				descriptorCount = 1,
+				pBufferInfo = &bufferInfo,
+			},
+			{
+				sType = .WRITE_DESCRIPTOR_SET,
+				dstSet = descriptorSets[i],
+				dstBinding = 1,
+				dstArrayElement = 0,
+				descriptorType = .COMBINED_IMAGE_SAMPLER,
+				descriptorCount = 1,
+				pImageInfo = &imageInfo,
+			},
+		}
+		vk.UpdateDescriptorSets(
+			device,
+			u32(len(descriptorWrites)),
+			raw_data(descriptorWrites[:]),
+			0,
+			nil,
+		)
 	}
 }
 
 
 createTextureImage :: proc(using app: ^HelloTriangleApplication) {
-	texWidth, texHeight, texChannels: i32
-	STBI_RGB_ALPHA :: 4
-	pixels := stbi.load(
+	img, err := jpeg.load_from_file(
 		"textures/texture.jpg",
-		&texWidth,
-		&texHeight,
-		&texChannels,
-		STBI_RGB_ALPHA,
+		{.alpha_add_if_missing},
+		context.temp_allocator,
 	)
-	assert(pixels != nil)
+	assert(err == nil)
+	assert(img.depth == 8)
+
+	texWidth := u32(img.width)
+	texHeight := u32(img.height)
+	// texChannels := u32(img.channels)
 	imageSize := vk.DeviceSize(texWidth * texHeight * 4)
+	pixels := img.pixels.buf[:]
 
 	stagingBuffer: vk.Buffer
 	stagingBufferMemory: vk.DeviceMemory
@@ -1380,10 +1422,8 @@ createTextureImage :: proc(using app: ^HelloTriangleApplication) {
 
 	data: rawptr
 	must(vk.MapMemory(device, stagingBufferMemory, 0, imageSize, {}, &data))
-	intrinsics.mem_copy_non_overlapping(data, pixels, imageSize)
+	intrinsics.mem_copy_non_overlapping(data, raw_data(pixels), imageSize)
 	vk.UnmapMemory(device, stagingBufferMemory)
-
-	stbi.image_free(pixels)
 	
 	// odinfmt: disable
 	createImage(app, u32(texWidth), u32(texHeight), .R8G8B8A8_SRGB, .OPTIMAL, {.TRANSFER_DST, .SAMPLED}, {.DEVICE_LOCAL}, &textureImage, &textureImageMemory)
