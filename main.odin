@@ -97,6 +97,8 @@ HelloTriangleApplication :: struct {
 	// buffers
 	textureImage:             vk.Image,
 	textureImageMemory:       vk.DeviceMemory,
+	textureImageView:         vk.ImageView,
+	textureSampler:           vk.Sampler,
 	vertexBuffer:             vk.Buffer,
 	vertexBufferMemory:       vk.DeviceMemory,
 	indexBuffer:              vk.Buffer,
@@ -162,6 +164,8 @@ initVulkan :: proc(using app: ^HelloTriangleApplication) {
 	createFramebuffers(app)
 	createCommandPool(app)
 	createTextureImage(app)
+	createTextureImageView(app)
+	createTextureSampler(app)
 	createVertexBuffer(app)
 	createIndexBuffer(app)
 	createUniformBuffers(app)
@@ -205,6 +209,8 @@ cleanupSwapChain :: proc(using app: ^HelloTriangleApplication) {
 
 cleanup :: proc(using app: ^HelloTriangleApplication) {
 	cleanupSwapChain(app)
+	vk.DestroySampler(device, textureSampler, nil)
+	vk.DestroyImageView(device, textureImageView, nil)
 	vk.DestroyImage(device, textureImage, nil)
 	vk.FreeMemory(device, textureImageMemory, nil)
 	vk.DestroyDescriptorSetLayout(device, descriptorSetLayout, nil)
@@ -493,6 +499,7 @@ createLogicalDevice :: proc(using app: ^HelloTriangleApplication) {
 	}
 
 	deviceFeatures: vk.PhysicalDeviceFeatures
+	deviceFeatures.samplerAnisotropy = true
 
 	createInfo := vk.DeviceCreateInfo {
 		sType                   = .DEVICE_CREATE_INFO,
@@ -663,26 +670,7 @@ querySwapChainSupport :: proc(
 createImageViews :: proc(using app: ^HelloTriangleApplication) {
 	swapChainImageViews = make([]vk.ImageView, len(swapChainImages))
 	for _, i in swapChainImages {
-		createInfo := vk.ImageViewCreateInfo {
-			sType = .IMAGE_VIEW_CREATE_INFO,
-			image = swapChainImages[i],
-			viewType = .D2,
-			format = swapChainImageFormat,
-			components = vk.ComponentMapping {
-				r = .IDENTITY,
-				g = .IDENTITY,
-				b = .IDENTITY,
-				a = .IDENTITY,
-			},
-			subresourceRange = vk.ImageSubresourceRange {
-				aspectMask = {.COLOR},
-				baseMipLevel = 0,
-				levelCount = 1,
-				baseArrayLayer = 0,
-				layerCount = 1,
-			},
-		}
-		must(vk.CreateImageView(device, &createInfo, nil, &swapChainImageViews[i]))
+		swapChainImageViews[i] = createImageView(app, swapChainImages[i], swapChainImageFormat)
 	}
 }
 
@@ -1526,5 +1514,60 @@ copyBufferToImage :: proc(
 	}
 	vk.CmdCopyBufferToImage(commandBuffer, buffer, image, .TRANSFER_DST_OPTIMAL, 1, &region)
 	endSingleTimeCommands(app, &commandBuffer)
+}
+
+createTextureImageView :: proc(using app: ^HelloTriangleApplication) {
+	app.textureImageView = createImageView(app, textureImage, .R8G8B8A8_SRGB)
+}
+
+createTextureSampler :: proc(using app: ^HelloTriangleApplication) {
+	properties: vk.PhysicalDeviceProperties
+	vk.GetPhysicalDeviceProperties(physicalDevce, &properties)
+
+	samplerInfo := vk.SamplerCreateInfo {
+		sType                   = .SAMPLER_CREATE_INFO,
+		magFilter               = .LINEAR,
+		minFilter               = .LINEAR,
+		addressModeU            = .REPEAT,
+		addressModeV            = .REPEAT,
+		addressModeW            = .REPEAT,
+		anisotropyEnable        = true,
+		maxAnisotropy           = properties.limits.maxSamplerAnisotropy,
+		borderColor             = .INT_OPAQUE_BLACK,
+		unnormalizedCoordinates = false,
+		compareEnable           = false,
+		compareOp               = .ALWAYS,
+		mipmapMode              = .LINEAR,
+	}
+	must(vk.CreateSampler(device, &samplerInfo, nil, &textureSampler))
+}
+
+createImageView :: proc(
+	app: ^HelloTriangleApplication,
+	image: vk.Image,
+	format: vk.Format,
+) -> vk.ImageView {
+	createInfo := vk.ImageViewCreateInfo {
+		sType = .IMAGE_VIEW_CREATE_INFO,
+		image = image,
+		viewType = .D2,
+		format = format,
+		// components = vk.ComponentMapping {
+		// 	r = .IDENTITY,
+		// 	g = .IDENTITY,
+		// 	b = .IDENTITY,
+		// 	a = .IDENTITY,
+		// },
+		subresourceRange = vk.ImageSubresourceRange {
+			aspectMask = {.COLOR},
+			baseMipLevel = 0,
+			levelCount = 1,
+			baseArrayLayer = 0,
+			layerCount = 1,
+		},
+	}
+	imageView: vk.ImageView
+	must(vk.CreateImageView(app.device, &createInfo, nil, &imageView))
+	return imageView
 }
 
