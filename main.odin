@@ -72,7 +72,7 @@ HelloTriangleApplication :: struct {
 	instance:                 vk.Instance,
 	debugMessenger:           vk.DebugUtilsMessengerEXT,
 	surface:                  vk.SurfaceKHR,
-	physicalDevce:            vk.PhysicalDevice,
+	physicalDevice:           vk.PhysicalDevice,
 	device:                   vk.Device,
 
 	// queues and swapchains
@@ -429,11 +429,11 @@ pickPhysicalDevice :: proc(using app: ^HelloTriangleApplication) {
 
 	for device in devices {
 		if isDeviceSuitable(surface, device) {
-			physicalDevce = device
+			physicalDevice = device
 			break
 		}
 	}
-	log.assertf(physicalDevce != nil, "failed to find a suitable GPU!")
+	log.assertf(physicalDevice != nil, "failed to find a suitable GPU!")
 }
 
 isDeviceSuitable :: proc(surface: vk.SurfaceKHR, device: vk.PhysicalDevice) -> bool {
@@ -477,7 +477,7 @@ findQueueFamilies :: proc(
 }
 
 createLogicalDevice :: proc(using app: ^HelloTriangleApplication) {
-	indices := findQueueFamilies(surface, physicalDevce)
+	indices := findQueueFamilies(surface, physicalDevice)
 	uniqueQueueFamilies: [dynamic]u32
 	defer delete(uniqueQueueFamilies)
 	append(&uniqueQueueFamilies, indices.graphicsFamily.?)
@@ -517,7 +517,7 @@ createLogicalDevice :: proc(using app: ^HelloTriangleApplication) {
 		createInfo.enabledLayerCount = 0
 	}
 
-	must(vk.CreateDevice(physicalDevce, &createInfo, nil, &device))
+	must(vk.CreateDevice(physicalDevice, &createInfo, nil, &device))
 	vk.GetDeviceQueue(device, indices.graphicsFamily.?, 0, &graphicsQueue)
 	vk.GetDeviceQueue(device, indices.presentFamily.?, 0, &presentQueue)
 }
@@ -533,7 +533,7 @@ SwapChainSupportDetails :: struct {
 }
 
 createSwapChain :: proc(using app: ^HelloTriangleApplication) {
-	swapChainSupport: SwapChainSupportDetails = querySwapChainSupport(surface, physicalDevce)
+	swapChainSupport: SwapChainSupportDetails = querySwapChainSupport(surface, physicalDevice)
 	defer delete(swapChainSupport.formats)
 	defer delete(swapChainSupport.presentModes)
 
@@ -559,7 +559,7 @@ createSwapChain :: proc(using app: ^HelloTriangleApplication) {
 		imageUsage       = {.COLOR_ATTACHMENT},
 	}
 
-	indices := findQueueFamilies(surface, physicalDevce)
+	indices := findQueueFamilies(surface, physicalDevice)
 	queueFamilyIndices := [?]u32{indices.graphicsFamily.?, indices.presentFamily.?}
 
 	if queueFamilyIndices[0] != queueFamilyIndices[1] {
@@ -877,7 +877,7 @@ createFramebuffers :: proc(using app: ^HelloTriangleApplication) {
 }
 
 createCommandPool :: proc(using app: ^HelloTriangleApplication) {
-	queueFamilyIndices := findQueueFamilies(surface, physicalDevce)
+	queueFamilyIndices := findQueueFamilies(surface, physicalDevice)
 	poolInfo := vk.CommandPoolCreateInfo {
 		sType            = .COMMAND_POOL_CREATE_INFO,
 		queueFamilyIndex = queueFamilyIndices.graphicsFamily.?,
@@ -1135,7 +1135,7 @@ createBuffer :: proc(
 		sType           = .MEMORY_ALLOCATE_INFO,
 		allocationSize  = memRequirements.size,
 		memoryTypeIndex = findMemoryType(
-			app.physicalDevce,
+			app.physicalDevice,
 			memRequirements.memoryTypeBits,
 			properties,
 		),
@@ -1428,7 +1428,7 @@ createImage :: proc(
 		sType           = .MEMORY_ALLOCATE_INFO,
 		allocationSize  = memRequirements.size,
 		memoryTypeIndex = findMemoryType(
-			app.physicalDevce,
+			app.physicalDevice,
 			memRequirements.memoryTypeBits,
 			properties,
 		),
@@ -1522,7 +1522,7 @@ createTextureImageView :: proc(using app: ^HelloTriangleApplication) {
 
 createTextureSampler :: proc(using app: ^HelloTriangleApplication) {
 	properties: vk.PhysicalDeviceProperties
-	vk.GetPhysicalDeviceProperties(physicalDevce, &properties)
+	vk.GetPhysicalDeviceProperties(physicalDevice, &properties)
 
 	samplerInfo := vk.SamplerCreateInfo {
 		sType                   = .SAMPLER_CREATE_INFO,
