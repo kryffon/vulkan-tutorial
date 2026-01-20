@@ -3,7 +3,7 @@ package main
 import "base:intrinsics"
 import "base:runtime"
 import "core:fmt"
-import "core:image/jpeg"
+import "core:image/png"
 import "core:log"
 import "core:math/bits"
 import "core:math/linalg/glsl"
@@ -12,6 +12,7 @@ import "core:os"
 import "core:slice"
 import "core:strings"
 import "core:time"
+import "tinyobj"
 import "vendor:glfw"
 import vk "vendor:vulkan"
 
@@ -31,6 +32,7 @@ glfw_error_callback :: proc "c" (code: i32, description: cstring) {
 	log.errorf("GLFW: %i: %s", code, description)
 }
 
+FPS :: 60
 WIDTH :: 800
 HEIGHT :: 600
 
@@ -40,6 +42,9 @@ SHADER_BASIC_VERT :: #load("./shaders/bin/basic.vert.spv")
 SHADER_BASIC_FRAG :: #load("./shaders/bin/basic.frag.spv")
 
 MAX_FRAMES_IN_FLIGHT :: 2
+
+MODEL_PATH :: "textures/viking_room.obj"
+TEXTURE_PATH :: "textures/viking_room.png"
 
 validationLayers := [?]cstring{"VK_LAYER_KHRONOS_validation"}
 deviceExtensions := [?]cstring{vk.KHR_SWAPCHAIN_EXTENSION_NAME}
@@ -102,6 +107,8 @@ HelloTriangleApplication :: struct {
 	textureImageMemory:       vk.DeviceMemory,
 	textureImageView:         vk.ImageView,
 	textureSampler:           vk.Sampler,
+	vertices:                 [dynamic]Vertex,
+	indices:                  [dynamic]u32,
 	vertexBuffer:             vk.Buffer,
 	vertexBufferMemory:       vk.DeviceMemory,
 	indexBuffer:              vk.Buffer,
@@ -122,6 +129,7 @@ HelloTriangleApplication :: struct {
 	// game objects
 	startTime:                time.Tick,
 	frameCounter:             i64,
+	frame_start:              time.Tick,
 }
 
 run :: proc(using app: ^HelloTriangleApplication) {
@@ -171,6 +179,7 @@ initVulkan :: proc(using app: ^HelloTriangleApplication) {
 	createTextureImage(app)
 	createTextureImageView(app)
 	createTextureSampler(app)
+	loadModel(app)
 	createVertexBuffer(app)
 	createIndexBuffer(app)
 	createUniformBuffers(app)
@@ -180,15 +189,29 @@ initVulkan :: proc(using app: ^HelloTriangleApplication) {
 	createSyncObjects(app)
 }
 
+beginFrame :: proc(using app: ^HelloTriangleApplication) {
+	frame_start = time.tick_now()
+}
+
+endFrame :: proc(using app: ^HelloTriangleApplication) {
+	frame_time_ms := time.duration_milliseconds(time.tick_since(frame_start))
+	remaining_ms := max(0, (1000.0 / FPS) - frame_time_ms)
+	time.sleep(time.Millisecond * time.Duration(remaining_ms))
+}
+
 mainLoop :: proc(using app: ^HelloTriangleApplication) {
 	startTime = time.tick_now()
 	for !glfw.WindowShouldClose(window) {
+		beginFrame(app)
+
 		glfw.PollEvents()
 		if glfw.GetKey(window, glfw.KEY_ESCAPE) == glfw.PRESS {
 			glfw.SetWindowShouldClose(window, true)
 		}
 		drawFrame(app)
 		frameCounter += 1
+
+		endFrame(app)
 	}
 	must(vk.DeviceWaitIdle(device))
 }
@@ -257,6 +280,8 @@ cleanup :: proc(using app: ^HelloTriangleApplication) {
 	delete(uniformBuffersMemory)
 	delete(uniformBuffersMapped)
 	delete(descriptorSets)
+	delete(vertices)
+	delete(indices)
 	log.debugf("TOTAL_FRAMES: %v", frameCounter)
 }
 
@@ -489,12 +514,12 @@ findQueueFamilies :: proc(
 }
 
 createLogicalDevice :: proc(using app: ^HelloTriangleApplication) {
-	indices := findQueueFamilies(surface, physicalDevice)
+	indices_q := findQueueFamilies(surface, physicalDevice)
 	uniqueQueueFamilies: [dynamic]u32
 	defer delete(uniqueQueueFamilies)
-	append(&uniqueQueueFamilies, indices.graphicsFamily.?)
-	if uniqueQueueFamilies[0] != indices.presentFamily.? {
-		append(&uniqueQueueFamilies, indices.presentFamily.?)
+	append(&uniqueQueueFamilies, indices_q.graphicsFamily.?)
+	if uniqueQueueFamilies[0] != indices_q.presentFamily.? {
+		append(&uniqueQueueFamilies, indices_q.presentFamily.?)
 	}
 
 	queueCreateInfos := make([]vk.DeviceQueueCreateInfo, len(uniqueQueueFamilies))
@@ -530,8 +555,8 @@ createLogicalDevice :: proc(using app: ^HelloTriangleApplication) {
 	}
 
 	must(vk.CreateDevice(physicalDevice, &createInfo, nil, &device))
-	vk.GetDeviceQueue(device, indices.graphicsFamily.?, 0, &graphicsQueue)
-	vk.GetDeviceQueue(device, indices.presentFamily.?, 0, &presentQueue)
+	vk.GetDeviceQueue(device, indices_q.graphicsFamily.?, 0, &graphicsQueue)
+	vk.GetDeviceQueue(device, indices_q.presentFamily.?, 0, &presentQueue)
 }
 
 createSurface :: proc(using app: ^HelloTriangleApplication) {
@@ -571,8 +596,8 @@ createSwapChain :: proc(using app: ^HelloTriangleApplication) {
 		imageUsage       = {.COLOR_ATTACHMENT},
 	}
 
-	indices := findQueueFamilies(surface, physicalDevice)
-	queueFamilyIndices := [?]u32{indices.graphicsFamily.?, indices.presentFamily.?}
+	indices_q := findQueueFamilies(surface, physicalDevice)
+	queueFamilyIndices := [?]u32{indices_q.graphicsFamily.?, indices_q.presentFamily.?}
 
 	if queueFamilyIndices[0] != queueFamilyIndices[1] {
 		createInfo.imageSharingMode = .CONCURRENT
@@ -977,7 +1002,7 @@ createCommandBuffers :: proc(using app: ^HelloTriangleApplication) {
 				raw_data(offsets[:]),
 			)
 
-			vk.CmdBindIndexBuffer(commandBuffers[i], indexBuffer, 0, .UINT16)
+			vk.CmdBindIndexBuffer(commandBuffers[i], indexBuffer, 0, .UINT32)
 			vk.CmdBindDescriptorSets(
 				commandBuffers[i],
 				.GRAPHICS,
@@ -1122,27 +1147,8 @@ UniformBufferObject :: struct #align (16) {
 	model, view, proj: glsl.mat4,
 }
 
-// odinfmt:disable
-vertices := [?]Vertex{
-	{{-0.5, -0.5, 0.0}, {1, 0, 0}, {1, 0}},
-	{{ 0.5, -0.5, 0.0}, {0, 1, 0}, {0, 0}},
-	{{ 0.5,  0.5, 0.0}, {0, 0, 1}, {0, 1}},
-	{{-0.5,  0.5, 0.0}, {1, 1, 1}, {1, 1}},
-
-	{{-0.5, -0.5, -0.5}, {1, 0, 0}, {1, 0}},
-	{{ 0.5, -0.5, -0.5}, {0, 1, 0}, {0, 0}},
-	{{ 0.5,  0.5, -0.5}, {0, 0, 1}, {0, 1}},
-	{{-0.5,  0.5, -0.5}, {1, 1, 1}, {1, 1}},
-}
-
-indices := [?]u16{
-	0,1,2,2,3,0,
-	4,5,6,6,7,4,
-}
-// odinfmt:enable
-
 createVertexBuffer :: proc(using app: ^HelloTriangleApplication) {
-	bufferSize: vk.DeviceSize = size_of(vertices[0]) * len(vertices)
+	bufferSize := vk.DeviceSize(size_of(vertices[0]) * len(vertices))
 
 	stagingBuffer: vk.Buffer
 	stagingBufferMemory: vk.DeviceMemory
@@ -1275,7 +1281,7 @@ findMemoryType :: proc(
 }
 
 createIndexBuffer :: proc(using app: ^HelloTriangleApplication) {
-	bufferSize: vk.DeviceSize = size_of(indices[0]) * len(indices)
+	bufferSize := vk.DeviceSize(size_of(indices[0]) * len(indices))
 
 	stagingBuffer: vk.Buffer
 	stagingBufferMemory: vk.DeviceMemory
@@ -1448,12 +1454,8 @@ createDescriptorSets :: proc(using app: ^HelloTriangleApplication) {
 
 
 createTextureImage :: proc(using app: ^HelloTriangleApplication) {
-	img, err := jpeg.load_from_file(
-		"textures/texture.jpg",
-		{.alpha_add_if_missing},
-		context.temp_allocator,
-	)
-	assert(err == nil)
+	img, err := png.load_from_file(TEXTURE_PATH, {.alpha_add_if_missing}, context.temp_allocator)
+	assert(err == nil, fmt.tprintf("image load error: %v", err))
 	assert(img.depth == 8)
 
 	texWidth := u32(img.width)
@@ -1711,5 +1713,76 @@ findDepthFormat :: proc(app: ^HelloTriangleApplication) -> vk.Format {
 
 hasStencilComponent :: proc(format: vk.Format) -> bool {
 	return format == .D32_SFLOAT_S8_UINT || format == .D24_UNORM_S8_UINT
+}
+
+loadModel :: proc(using app: ^HelloTriangleApplication) {
+	obj_data, ok := os.read_entire_file_from_filename(MODEL_PATH, context.temp_allocator)
+	assert(ok)
+	// obj := tinyobj.parse_obj(string(obj_data), "", tinyobj.FLAG_TRIANGULATE)
+	obj := tinyobj.parse_obj(string(obj_data))
+	assert(obj.success)
+	defer tinyobj.destroy(&obj)
+
+	uniqueVertices := make(map[Vertex]u32)
+	defer delete(uniqueVertices)
+
+	// for shape in obj.shapes {
+	// 	for i in 0 ..= shape.length {
+	// 		index := obj.attrib.faces[shape.face_offset + i]
+
+	// 		vertex: Vertex
+	// 		vertex.pos = {
+	// 			obj.attrib.vertices[3 * index.v_idx + 0],
+	// 			obj.attrib.vertices[3 * index.v_idx + 1],
+	// 			obj.attrib.vertices[3 * index.v_idx + 2],
+	// 		}
+	// 		vertex.texCoord = {
+	// 			obj.attrib.texcoords[2 * index.vt_idx + 0],
+	// 			1 - obj.attrib.texcoords[2 * index.vt_idx + 1],
+	// 		}
+	// 		vertex.color = {1, 1, 1}
+
+	// 		if !(vertex in uniqueVertices) {
+	// 			uniqueVertices[vertex] = u32(len(vertices))
+	// 			append(&vertices, vertex)
+	// 		}
+	// 		append(&indices, uniqueVertices[vertex])
+	// 	}
+	// }
+
+	for index in obj.attrib.faces {
+		vertex: Vertex
+		vertex.pos = {
+			obj.attrib.vertices[3 * index.v_idx + 0],
+			obj.attrib.vertices[3 * index.v_idx + 1],
+			obj.attrib.vertices[3 * index.v_idx + 2],
+		}
+		vertex.texCoord = {
+			obj.attrib.texcoords[2 * index.vt_idx + 0],
+			1 - obj.attrib.texcoords[2 * index.vt_idx + 1],
+		}
+		vertex.color = {1, 1, 1}
+
+		if !(vertex in uniqueVertices) {
+			uniqueVertices[vertex] = u32(len(vertices))
+			append(&vertices, vertex)
+		}
+		append(&indices, uniqueVertices[vertex])
+	}
+
+	// tmp_vertices := [?]Vertex {
+	// 	{{-0.5, -0.5, 0.0}, {1, 0, 0}, {1, 0}},
+	// 	{{0.5, -0.5, 0.0}, {0, 1, 0}, {0, 0}},
+	// 	{{0.5, 0.5, 0.0}, {0, 0, 1}, {0, 1}},
+	// 	{{-0.5, 0.5, 0.0}, {1, 1, 1}, {1, 1}},
+	// 	{{-0.5, -0.5, -0.5}, {1, 0, 0}, {1, 0}},
+	// 	{{0.5, -0.5, -0.5}, {0, 1, 0}, {0, 0}},
+	// 	{{0.5, 0.5, -0.5}, {0, 0, 1}, {0, 1}},
+	// 	{{-0.5, 0.5, -0.5}, {1, 1, 1}, {1, 1}},
+	// }
+
+	// tmp_indices := [?]u32{0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4}
+	// append_elems(&vertices, ..tmp_vertices[:])
+	// append_elems(&indices, ..tmp_indices[:])
 }
 
