@@ -95,6 +95,9 @@ HelloTriangleApplication :: struct {
 	commandPool:              vk.CommandPool,
 
 	// buffers
+	depthImage:               vk.Image,
+	depthImageMemory:         vk.DeviceMemory,
+	depthImageView:           vk.ImageView,
 	textureImage:             vk.Image,
 	textureImageMemory:       vk.DeviceMemory,
 	textureImageView:         vk.ImageView,
@@ -162,8 +165,9 @@ initVulkan :: proc(using app: ^HelloTriangleApplication) {
 	createRenderPass(app)
 	createDescriptorSetLayout(app)
 	createGraphicsPipeline(app)
-	createFramebuffers(app)
 	createCommandPool(app)
+	createDepthResources(app)
+	createFramebuffers(app)
 	createTextureImage(app)
 	createTextureImageView(app)
 	createTextureSampler(app)
@@ -190,6 +194,10 @@ mainLoop :: proc(using app: ^HelloTriangleApplication) {
 }
 
 cleanupSwapChain :: proc(using app: ^HelloTriangleApplication) {
+	vk.DestroyImageView(device, depthImageView, nil)
+	vk.DestroyImage(device, depthImage, nil)
+	vk.FreeMemory(device, depthImageMemory, nil)
+
 	for framebuffer in swapChainFramebuffers {
 		vk.DestroyFramebuffer(device, framebuffer, nil)
 	}
@@ -263,6 +271,7 @@ recreateSwapChain :: proc(using app: ^HelloTriangleApplication) {
 
 	createSwapChain(app)
 	createImageViews(app)
+	createDepthResources(app)
 	createRenderPass(app)
 	createGraphicsPipeline(app)
 	createFramebuffers(app)
@@ -673,7 +682,12 @@ querySwapChainSupport :: proc(
 createImageViews :: proc(using app: ^HelloTriangleApplication) {
 	swapChainImageViews = make([]vk.ImageView, len(swapChainImages))
 	for _, i in swapChainImages {
-		swapChainImageViews[i] = createImageView(app, swapChainImages[i], swapChainImageFormat)
+		swapChainImageViews[i] = createImageView(
+			app,
+			swapChainImages[i],
+			swapChainImageFormat,
+			{.COLOR},
+		)
 	}
 }
 
@@ -760,6 +774,15 @@ createGraphicsPipeline :: proc(using app: ^HelloTriangleApplication) {
 		rasterizationSamples = {._1},
 	}
 
+	depthStencil := vk.PipelineDepthStencilStateCreateInfo {
+		sType                 = .PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+		depthTestEnable       = true,
+		depthWriteEnable      = true,
+		depthCompareOp        = .LESS,
+		depthBoundsTestEnable = false,
+		stencilTestEnable     = false,
+	}
+
 	colorBlendAttachment := vk.PipelineColorBlendAttachmentState {
 		colorWriteMask = {.R, .G, .B, .A},
 		blendEnable    = false,
@@ -792,6 +815,7 @@ createGraphicsPipeline :: proc(using app: ^HelloTriangleApplication) {
 		pViewportState      = &viewportState,
 		pRasterizationState = &rasterizer,
 		pMultisampleState   = &multisampling,
+		pDepthStencilState  = &depthStencil,
 		pColorBlendState    = &colorBlending,
 		layout              = pipelineLayout,
 		renderPass          = renderPass,
@@ -827,30 +851,49 @@ createRenderPass :: proc(using app: ^HelloTriangleApplication) {
 		finalLayout    = .PRESENT_SRC_KHR,
 	}
 
+	depthAttactment := vk.AttachmentDescription {
+		format         = findDepthFormat(app),
+		samples        = {._1},
+		loadOp         = .CLEAR,
+		storeOp        = .DONT_CARE,
+		stencilLoadOp  = .DONT_CARE,
+		stencilStoreOp = .DONT_CARE,
+		initialLayout  = .UNDEFINED,
+		finalLayout    = .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+	}
+
 	colorAttachmentRef := vk.AttachmentReference {
 		attachment = 0,
 		layout     = .COLOR_ATTACHMENT_OPTIMAL,
 	}
 
+	depthAttactmentRef := vk.AttachmentReference {
+		attachment = 1,
+		layout     = .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+	}
+
 	subpass := vk.SubpassDescription {
-		pipelineBindPoint    = .GRAPHICS,
-		colorAttachmentCount = 1,
-		pColorAttachments    = &colorAttachmentRef,
+		pipelineBindPoint       = .GRAPHICS,
+		colorAttachmentCount    = 1,
+		pColorAttachments       = &colorAttachmentRef,
+		pDepthStencilAttachment = &depthAttactmentRef,
 	}
 
 	dependency := vk.SubpassDependency {
 		srcSubpass    = vk.SUBPASS_EXTERNAL,
 		dstSubpass    = 0,
-		srcStageMask  = {.COLOR_ATTACHMENT_OUTPUT},
-		// srcAccessMask = {.INDIRECT_COMMAND_READ},
-		dstStageMask  = {.COLOR_ATTACHMENT_OUTPUT},
-		dstAccessMask = {.COLOR_ATTACHMENT_WRITE},
+		srcStageMask  = {.COLOR_ATTACHMENT_OUTPUT, .LATE_FRAGMENT_TESTS},
+		srcAccessMask = {.DEPTH_STENCIL_ATTACHMENT_WRITE},
+		dstStageMask  = {.COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS},
+		dstAccessMask = {.COLOR_ATTACHMENT_WRITE, .DEPTH_STENCIL_ATTACHMENT_WRITE},
 	}
+
+	attachments := [?]vk.AttachmentDescription{colorAttachment, depthAttactment}
 
 	renderPassInfo := vk.RenderPassCreateInfo {
 		sType           = .RENDER_PASS_CREATE_INFO,
-		attachmentCount = 1,
-		pAttachments    = &colorAttachment,
+		attachmentCount = u32(len(attachments)),
+		pAttachments    = raw_data(attachments[:]),
 		subpassCount    = 1,
 		pSubpasses      = &subpass,
 		dependencyCount = 1,
@@ -864,12 +907,12 @@ createFramebuffers :: proc(using app: ^HelloTriangleApplication) {
 	swapChainFramebuffers = make([]vk.Framebuffer, len(swapChainImageViews))
 
 	for _, i in swapChainImageViews {
-		attachments := [?]vk.ImageView{swapChainImageViews[i]}
+		attachments := [?]vk.ImageView{swapChainImageViews[i], depthImageView}
 
 		framebufferInfo := vk.FramebufferCreateInfo {
 			sType           = .FRAMEBUFFER_CREATE_INFO,
 			renderPass      = renderPass,
-			attachmentCount = 1,
+			attachmentCount = u32(len(attachments)),
 			pAttachments    = raw_data(attachments[:]),
 			width           = swapChainExtent.width,
 			height          = swapChainExtent.height,
@@ -906,16 +949,18 @@ createCommandBuffers :: proc(using app: ^HelloTriangleApplication) {
 
 		must(vk.BeginCommandBuffer(commandBuffers[i], &beginInfo))
 
-		clearColor := vk.ClearValue {
-			color = vk.ClearColorValue{float32 = [4]f32{0, 0, 0, 1}},
+		clearValues := [?]vk.ClearValue {
+			{color = vk.ClearColorValue{float32 = [4]f32{0, 0, 0, 1}}},
+			{depthStencil = vk.ClearDepthStencilValue{1, 0}},
 		}
+
 		renderPassInfo := vk.RenderPassBeginInfo {
 			sType = .RENDER_PASS_BEGIN_INFO,
 			renderPass = renderPass,
 			framebuffer = swapChainFramebuffers[i],
 			renderArea = {offset = {0, 0}, extent = swapChainExtent},
-			clearValueCount = 1,
-			pClearValues = &clearColor,
+			clearValueCount = u32(len(clearValues)),
+			pClearValues = raw_data(clearValues[:]),
 		}
 
 		vk.CmdBeginRenderPass(commandBuffers[i], &renderPassInfo, .INLINE)
@@ -1029,7 +1074,7 @@ drawFrame :: proc(using app: ^HelloTriangleApplication) {
 }
 
 Vertex :: struct {
-	pos:      [2]f32,
+	pos:      [3]f32,
 	color:    [3]f32,
 	texCoord: [2]f32,
 }
@@ -1052,7 +1097,7 @@ getAttributeDescription :: proc($T: typeid) -> []vk.VertexInputAttributeDescript
 		attributeDescriptions[0] = {
 			binding  = 0,
 			location = 0,
-			format   = .R32G32_SFLOAT,
+			format   = .R32G32B32_SFLOAT,
 			offset   = u32(offset_of(Vertex, pos)),
 		}
 		attributeDescriptions[1] = {
@@ -1079,13 +1124,21 @@ UniformBufferObject :: struct #align (16) {
 
 // odinfmt:disable
 vertices := [?]Vertex{
-	{{-0.5, -0.5}, {1, 0, 0}, {1, 0}},
-	{{ 0.5, -0.5}, {0, 1, 0}, {0, 0}},
-	{{ 0.5,  0.5}, {0, 0, 1}, {0, 1}},
-	{{-0.5,  0.5}, {1, 1, 1}, {1, 1}},
+	{{-0.5, -0.5, 0.0}, {1, 0, 0}, {1, 0}},
+	{{ 0.5, -0.5, 0.0}, {0, 1, 0}, {0, 0}},
+	{{ 0.5,  0.5, 0.0}, {0, 0, 1}, {0, 1}},
+	{{-0.5,  0.5, 0.0}, {1, 1, 1}, {1, 1}},
+
+	{{-0.5, -0.5, -0.5}, {1, 0, 0}, {1, 0}},
+	{{ 0.5, -0.5, -0.5}, {0, 1, 0}, {0, 0}},
+	{{ 0.5,  0.5, -0.5}, {0, 0, 1}, {0, 1}},
+	{{-0.5,  0.5, -0.5}, {1, 1, 1}, {1, 1}},
 }
 
-indices := [?]u16{0,1,2,2,3,0}
+indices := [?]u16{
+	0,1,2,2,3,0,
+	4,5,6,6,7,4,
+}
 // odinfmt:enable
 
 createVertexBuffer :: proc(using app: ^HelloTriangleApplication) {
@@ -1557,7 +1610,7 @@ copyBufferToImage :: proc(
 }
 
 createTextureImageView :: proc(using app: ^HelloTriangleApplication) {
-	app.textureImageView = createImageView(app, textureImage, .R8G8B8A8_SRGB)
+	app.textureImageView = createImageView(app, textureImage, .R8G8B8A8_SRGB, {.COLOR})
 }
 
 createTextureSampler :: proc(using app: ^HelloTriangleApplication) {
@@ -1586,6 +1639,7 @@ createImageView :: proc(
 	app: ^HelloTriangleApplication,
 	image: vk.Image,
 	format: vk.Format,
+	aspectFlags: vk.ImageAspectFlags,
 ) -> vk.ImageView {
 	createInfo := vk.ImageViewCreateInfo {
 		sType = .IMAGE_VIEW_CREATE_INFO,
@@ -1599,7 +1653,7 @@ createImageView :: proc(
 		// 	a = .IDENTITY,
 		// },
 		subresourceRange = vk.ImageSubresourceRange {
-			aspectMask = {.COLOR},
+			aspectMask = aspectFlags,
 			baseMipLevel = 0,
 			levelCount = 1,
 			baseArrayLayer = 0,
@@ -1609,5 +1663,53 @@ createImageView :: proc(
 	imageView: vk.ImageView
 	must(vk.CreateImageView(app.device, &createInfo, nil, &imageView))
 	return imageView
+}
+
+createDepthResources :: proc(using app: ^HelloTriangleApplication) {
+	depthFormat := findDepthFormat(app)
+	createImage(
+		app,
+		swapChainExtent.width,
+		swapChainExtent.height,
+		depthFormat,
+		.OPTIMAL,
+		{.DEPTH_STENCIL_ATTACHMENT},
+		{.DEVICE_LOCAL},
+		&depthImage,
+		&depthImageMemory,
+	)
+	depthImageView = createImageView(app, depthImage, depthFormat, {.DEPTH})
+}
+
+findSupportedFormat :: proc(
+	app: ^HelloTriangleApplication,
+	candidates: []vk.Format,
+	tiling: vk.ImageTiling,
+	features: vk.FormatFeatureFlags,
+) -> vk.Format {
+	for format in candidates {
+		props: vk.FormatProperties
+		vk.GetPhysicalDeviceFormatProperties(app.physicalDevice, format, &props)
+		if tiling == .LINEAR && features <= props.linearTilingFeatures {
+			return format
+		} else if tiling == .OPTIMAL && features <= props.optimalTilingFeatures {
+			return format
+		}
+	}
+	assert(false, "failed to find supported format!")
+	return .UNDEFINED
+}
+
+findDepthFormat :: proc(app: ^HelloTriangleApplication) -> vk.Format {
+	return findSupportedFormat(
+		app,
+		{.D32_SFLOAT, .D32_SFLOAT_S8_UINT, .D24_UNORM_S8_UINT},
+		.OPTIMAL,
+		{.DEPTH_STENCIL_ATTACHMENT},
+	)
+}
+
+hasStencilComponent :: proc(format: vk.Format) -> bool {
+	return format == .D32_SFLOAT_S8_UINT || format == .D24_UNORM_S8_UINT
 }
 
