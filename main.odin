@@ -5,6 +5,7 @@ import "base:runtime"
 import "core:fmt"
 import "core:image/png"
 import "core:log"
+import "core:math"
 import "core:math/bits"
 import "core:math/linalg/glsl"
 import "core:mem"
@@ -103,6 +104,7 @@ HelloTriangleApplication :: struct {
 	depthImage:               vk.Image,
 	depthImageMemory:         vk.DeviceMemory,
 	depthImageView:           vk.ImageView,
+	mipLevels:                u32,
 	textureImage:             vk.Image,
 	textureImageMemory:       vk.DeviceMemory,
 	textureImageView:         vk.ImageView,
@@ -712,6 +714,7 @@ createImageViews :: proc(using app: ^HelloTriangleApplication) {
 			swapChainImages[i],
 			swapChainImageFormat,
 			{.COLOR},
+			1,
 		)
 	}
 }
@@ -1464,6 +1467,8 @@ createTextureImage :: proc(using app: ^HelloTriangleApplication) {
 	imageSize := vk.DeviceSize(texWidth * texHeight * 4)
 	pixels := img.pixels.buf[:]
 
+	mipLevels = u32(math.floor(math.log2(f32(max(texWidth, texHeight))))) + 1
+
 	stagingBuffer: vk.Buffer
 	stagingBufferMemory: vk.DeviceMemory
 	createBuffer(
@@ -1481,19 +1486,22 @@ createTextureImage :: proc(using app: ^HelloTriangleApplication) {
 	vk.UnmapMemory(device, stagingBufferMemory)
 	
 	// odinfmt: disable
-	createImage(app, u32(texWidth), u32(texHeight), .R8G8B8A8_SRGB, .OPTIMAL, {.TRANSFER_DST, .SAMPLED}, {.DEVICE_LOCAL}, &textureImage, &textureImageMemory)
-	transitionImageLayout(app, textureImage, .R8G8B8A8_SRGB, .UNDEFINED, .TRANSFER_DST_OPTIMAL)
+	createImage(app, u32(texWidth), u32(texHeight), mipLevels, .R8G8B8A8_SRGB, .OPTIMAL, {.TRANSFER_SRC, .TRANSFER_DST, .SAMPLED}, {.DEVICE_LOCAL}, &textureImage, &textureImageMemory)
+	transitionImageLayout(app, textureImage, .R8G8B8A8_SRGB, .UNDEFINED, .TRANSFER_DST_OPTIMAL, mipLevels)
 	copyBufferToImage(app, stagingBuffer, textureImage, u32(texWidth), u32(texHeight))
-	transitionImageLayout(app, textureImage, .R8G8B8A8_SRGB, .TRANSFER_DST_OPTIMAL, .SHADER_READ_ONLY_OPTIMAL)
-	// odinfmt: enable
+	// transitionImageLayout(app, textureImage, .R8G8B8A8_SRGB, .TRANSFER_DST_OPTIMAL, .SHADER_READ_ONLY_OPTIMAL)
+	// transition will happen while generating mipmaps
 
 	vk.DestroyBuffer(device, stagingBuffer, nil)
 	vk.FreeMemory(device, stagingBufferMemory, nil)
+	generateMipmaps(app, textureImage, .R8G8B8A8_SRGB, texWidth, texHeight, mipLevels)
+	// odinfmt: enable
 }
+
 
 createImage :: proc(
 	app: ^HelloTriangleApplication,
-	width, height: u32,
+	width, height, mipLevels: u32,
 	format: vk.Format,
 	tiling: vk.ImageTiling,
 	usage: vk.ImageUsageFlags,
@@ -1505,7 +1513,7 @@ createImage :: proc(
 		sType = .IMAGE_CREATE_INFO,
 		imageType = .D2,
 		extent = {width = width, height = height, depth = 1},
-		mipLevels = 1,
+		mipLevels = mipLevels,
 		arrayLayers = 1,
 		format = format,
 		tiling = tiling,
@@ -1537,6 +1545,7 @@ transitionImageLayout :: proc(
 	image: vk.Image,
 	format: vk.Format,
 	oldLayout, newLayout: vk.ImageLayout,
+	mipLevels: u32,
 ) {
 	commandBuffer := beginSingleTimeCommands(app)
 
@@ -1550,7 +1559,7 @@ transitionImageLayout :: proc(
 		subresourceRange = {
 			aspectMask = {.COLOR},
 			baseMipLevel = 0,
-			levelCount = 1,
+			levelCount = mipLevels,
 			baseArrayLayer = 0,
 			layerCount = 1,
 		},
@@ -1612,7 +1621,7 @@ copyBufferToImage :: proc(
 }
 
 createTextureImageView :: proc(using app: ^HelloTriangleApplication) {
-	app.textureImageView = createImageView(app, textureImage, .R8G8B8A8_SRGB, {.COLOR})
+	app.textureImageView = createImageView(app, textureImage, .R8G8B8A8_SRGB, {.COLOR}, mipLevels)
 }
 
 createTextureSampler :: proc(using app: ^HelloTriangleApplication) {
@@ -1633,6 +1642,9 @@ createTextureSampler :: proc(using app: ^HelloTriangleApplication) {
 		compareEnable           = false,
 		compareOp               = .ALWAYS,
 		mipmapMode              = .LINEAR,
+		minLod                  = 0,
+		maxLod                  = vk.LOD_CLAMP_NONE,
+		mipLodBias              = 0,
 	}
 	must(vk.CreateSampler(device, &samplerInfo, nil, &textureSampler))
 }
@@ -1642,6 +1654,7 @@ createImageView :: proc(
 	image: vk.Image,
 	format: vk.Format,
 	aspectFlags: vk.ImageAspectFlags,
+	mipLevels: u32,
 ) -> vk.ImageView {
 	createInfo := vk.ImageViewCreateInfo {
 		sType = .IMAGE_VIEW_CREATE_INFO,
@@ -1657,7 +1670,7 @@ createImageView :: proc(
 		subresourceRange = vk.ImageSubresourceRange {
 			aspectMask = aspectFlags,
 			baseMipLevel = 0,
-			levelCount = 1,
+			levelCount = mipLevels,
 			baseArrayLayer = 0,
 			layerCount = 1,
 		},
@@ -1673,6 +1686,7 @@ createDepthResources :: proc(using app: ^HelloTriangleApplication) {
 		app,
 		swapChainExtent.width,
 		swapChainExtent.height,
+		1,
 		depthFormat,
 		.OPTIMAL,
 		{.DEPTH_STENCIL_ATTACHMENT},
@@ -1680,7 +1694,7 @@ createDepthResources :: proc(using app: ^HelloTriangleApplication) {
 		&depthImage,
 		&depthImageMemory,
 	)
-	depthImageView = createImageView(app, depthImage, depthFormat, {.DEPTH})
+	depthImageView = createImageView(app, depthImage, depthFormat, {.DEPTH}, 1)
 }
 
 findSupportedFormat :: proc(
@@ -1784,5 +1798,96 @@ loadModel :: proc(using app: ^HelloTriangleApplication) {
 	// tmp_indices := [?]u32{0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4}
 	// append_elems(&vertices, ..tmp_vertices[:])
 	// append_elems(&indices, ..tmp_indices[:])
+}
+
+generateMipmaps :: proc(
+	app: ^HelloTriangleApplication,
+	image: vk.Image,
+	imageFormat: vk.Format,
+	texWidth, texHeight, mipLevels: u32,
+) {
+	formatProperties: vk.FormatProperties
+	vk.GetPhysicalDeviceFormatProperties(app.physicalDevice, imageFormat, &formatProperties)
+
+	if !(vk.FormatFeatureFlag.SAMPLED_IMAGE_FILTER_LINEAR in
+		   formatProperties.optimalTilingFeatures) {
+		assert(false, "texture image format does not support linear blitting!")
+	}
+
+	commandBuffer := beginSingleTimeCommands(app)
+	barrier := vk.ImageMemoryBarrier {
+		sType = .IMAGE_MEMORY_BARRIER,
+		image = image,
+		srcQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED,
+		dstQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED,
+		subresourceRange = {
+			aspectMask = {.COLOR},
+			baseArrayLayer = 0,
+			layerCount = 1,
+			levelCount = 1,
+		},
+	}
+
+	mipWidth, mipHeight := i32(texWidth), i32(texHeight)
+	for i in 1 ..< app.mipLevels {
+		barrier.subresourceRange.baseMipLevel = i - 1
+		barrier.oldLayout = .TRANSFER_DST_OPTIMAL
+		barrier.newLayout = .TRANSFER_SRC_OPTIMAL
+		barrier.srcAccessMask = {.TRANSFER_WRITE}
+		barrier.dstAccessMask = {.TRANSFER_READ}
+		
+			// odinfmt: disable
+		vk.CmdPipelineBarrier(commandBuffer, {.TRANSFER}, {.TRANSFER}, {}, 0, nil, 0, nil, 1, &barrier)
+
+		blit := vk.ImageBlit {
+			srcOffsets = {{0, 0, 0}, {mipWidth, mipHeight, 1}},
+			srcSubresource = {
+				aspectMask = {.COLOR},
+				mipLevel = i - 1,
+				baseArrayLayer = 0,
+				layerCount = 1,
+			},
+			dstOffsets = {{0, 0, 0}, {max(mipWidth/2, 1), max(mipHeight/2, 1), 1}},
+			dstSubresource = {
+				aspectMask = {.COLOR},
+				mipLevel = i,
+				baseArrayLayer = 0,
+				layerCount = 1,
+			}
+		}
+
+		vk.CmdBlitImage(commandBuffer, image, .TRANSFER_SRC_OPTIMAL, image, .TRANSFER_DST_OPTIMAL, 1, &blit, .LINEAR)
+
+		barrier.oldLayout = .TRANSFER_SRC_OPTIMAL
+		barrier.newLayout = .SHADER_READ_ONLY_OPTIMAL
+		barrier.srcAccessMask = {.TRANSFER_READ}
+		barrier.dstAccessMask = {.SHADER_READ}
+
+		vk.CmdPipelineBarrier(commandBuffer, {.TRANSFER}, {.FRAGMENT_SHADER}, {}, 0, nil, 0, nil, 1, &barrier)
+		// odinfmt: enable
+
+		if mipWidth > 1 do mipWidth /= 2
+		if mipHeight > 1 do mipHeight /= 2
+	}
+
+	barrier.subresourceRange.baseMipLevel = mipLevels - 1
+	barrier.oldLayout = .TRANSFER_DST_OPTIMAL
+	barrier.newLayout = .SHADER_READ_ONLY_OPTIMAL
+	barrier.srcAccessMask = {.TRANSFER_WRITE}
+	barrier.dstAccessMask = {.SHADER_READ}
+
+	vk.CmdPipelineBarrier(
+		commandBuffer,
+		{.TRANSFER},
+		{.FRAGMENT_SHADER},
+		{},
+		0,
+		nil,
+		0,
+		nil,
+		1,
+		&barrier,
+	)
+	endSingleTimeCommands(app, &commandBuffer)
 }
 
