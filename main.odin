@@ -241,6 +241,8 @@ cleanupSwapChain :: proc(using app: ^HelloTriangleApplication) {
 	}
 	vk.DestroySwapchainKHR(device, swapChain, nil)
 
+	delete(swapChainFramebuffers)
+	delete(swapChainImageViews)
 }
 
 cleanup :: proc(using app: ^HelloTriangleApplication) {
@@ -283,9 +285,7 @@ cleanup :: proc(using app: ^HelloTriangleApplication) {
 	glfw.Terminate()
 
 	delete(commandBuffers)
-	delete(swapChainFramebuffers)
 	delete(swapChainImages)
-	delete(swapChainImageViews)
 	delete(renderFinishedSemaphores)
 	delete(imageAvailableSemaphores)
 	delete(inFlightFences)
@@ -626,6 +626,7 @@ createSwapChain :: proc(using app: ^HelloTriangleApplication) {
 	must(vk.CreateSwapchainKHR(device, &createInfo, nil, &swapChain))
 
 	must(vk.GetSwapchainImagesKHR(device, swapChain, &imageCount, nil))
+	if len(swapChainImages) != 0 do delete(swapChainImages)
 	swapChainImages = make([]vk.Image, imageCount)
 	must(vk.GetSwapchainImagesKHR(device, swapChain, &imageCount, raw_data(swapChainImages)))
 
@@ -1101,7 +1102,7 @@ createSyncObjects :: proc(using app: ^HelloTriangleApplication) {
 }
 
 drawFrame :: proc(using app: ^HelloTriangleApplication) {
-	must(vk.WaitForFences(device, 1, raw_data(inFlightFences), true, bits.U64_MAX))
+	must(vk.WaitForFences(device, 1, &inFlightFences[currentFrame], true, bits.U64_MAX))
 
 	imageIndex: u32
 	result := vk.AcquireNextImageKHR(
@@ -1150,7 +1151,13 @@ drawFrame :: proc(using app: ^HelloTriangleApplication) {
 		pSwapchains        = raw_data(swapChains[:]),
 		pImageIndices      = &imageIndex,
 	}
-	vk.QueuePresentKHR(presentQueue, &presentInfo)
+	result = vk.QueuePresentKHR(presentQueue, &presentInfo)
+	if result == .ERROR_OUT_OF_DATE_KHR || result == .SUBOPTIMAL_KHR || framebufferResized {
+		framebufferResized = false
+		recreateSwapChain(app)
+	} else if result != .SUCCESS {
+		assert(false, "failed to present swap chain image!")
+	}
 	currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT
 }
 
