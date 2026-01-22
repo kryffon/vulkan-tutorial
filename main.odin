@@ -128,7 +128,6 @@ HelloTriangleApplication :: struct {
 	imageAvailableSemaphores: []vk.Semaphore,
 	renderFinishedSemaphores: []vk.Semaphore,
 	inFlightFences:           []vk.Fence,
-	imagesInFlight:           []vk.Fence,
 	currentFrame:             int,
 	framebufferResized:       bool,
 
@@ -237,24 +236,26 @@ cleanupSwapChain :: proc(using app: ^HelloTriangleApplication) {
 	for framebuffer in swapChainFramebuffers {
 		vk.DestroyFramebuffer(device, framebuffer, nil)
 	}
-	vk.FreeCommandBuffers(device, commandPool, u32(len(commandBuffers)), raw_data(commandBuffers))
-	vk.DestroyPipeline(device, graphicsPipeline, nil)
-	vk.DestroyPipelineLayout(device, pipelineLayout, nil)
-	vk.DestroyRenderPass(device, renderPass, nil)
 	for imageView in swapChainImageViews {
 		vk.DestroyImageView(device, imageView, nil)
 	}
 	vk.DestroySwapchainKHR(device, swapChain, nil)
 
-	for i in 0 ..< len(swapChainImages) {
-		vk.DestroyBuffer(device, uniformBuffers[i], nil)
-		vk.FreeMemory(device, uniformBuffersMemory[i], nil)
-	}
-	vk.DestroyDescriptorPool(device, descriptorPool, nil)
 }
 
 cleanup :: proc(using app: ^HelloTriangleApplication) {
 	cleanupSwapChain(app)
+	// vk.FreeCommandBuffers(device, commandPool, u32(len(commandBuffers)), raw_data(commandBuffers))
+	vk.DestroyPipeline(device, graphicsPipeline, nil)
+	vk.DestroyPipelineLayout(device, pipelineLayout, nil)
+	vk.DestroyRenderPass(device, renderPass, nil)
+
+	for i in 0 ..< len(uniformBuffers) {
+		vk.DestroyBuffer(device, uniformBuffers[i], nil)
+		vk.FreeMemory(device, uniformBuffersMemory[i], nil)
+	}
+	vk.DestroyDescriptorPool(device, descriptorPool, nil)
+
 	vk.DestroySampler(device, textureSampler, nil)
 	vk.DestroyImageView(device, textureImageView, nil)
 	vk.DestroyImage(device, textureImage, nil)
@@ -288,7 +289,6 @@ cleanup :: proc(using app: ^HelloTriangleApplication) {
 	delete(renderFinishedSemaphores)
 	delete(imageAvailableSemaphores)
 	delete(inFlightFences)
-	delete(imagesInFlight)
 	delete(uniformBuffers)
 	delete(uniformBuffersMemory)
 	delete(uniformBuffersMapped)
@@ -311,13 +311,7 @@ recreateSwapChain :: proc(using app: ^HelloTriangleApplication) {
 	createImageViews(app)
 	createColorResources(app)
 	createDepthResources(app)
-	createRenderPass(app)
-	createGraphicsPipeline(app)
 	createFramebuffers(app)
-	createUniformBuffers(app)
-	createDescriptorPool(app)
-	createDescriptorSets(app)
-	createCommandBuffers(app)
 
 	// reserve(&imagesInFlight, len(swapChainImages))
 }
@@ -776,26 +770,26 @@ createGraphicsPipeline :: proc(using app: ^HelloTriangleApplication) {
 		primitiveRestartEnable = false,
 	}
 
-	viewport := vk.Viewport {
-		x        = 0,
-		y        = 0,
-		width    = f32(swapChainExtent.width),
-		height   = f32(swapChainExtent.height),
-		minDepth = 0,
-		maxDepth = 1,
-	}
+	// viewport := vk.Viewport {
+	// 	x        = 0,
+	// 	y        = 0,
+	// 	width    = f32(swapChainExtent.width),
+	// 	height   = f32(swapChainExtent.height),
+	// 	minDepth = 0,
+	// 	maxDepth = 1,
+	// }
 
-	scissor := vk.Rect2D {
-		offset = {0, 0},
-		extent = swapChainExtent,
-	}
+	// scissor := vk.Rect2D {
+	// 	offset = {0, 0},
+	// 	extent = swapChainExtent,
+	// }
 
 	viewportState := vk.PipelineViewportStateCreateInfo {
 		sType         = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
 		viewportCount = 1,
-		pViewports    = &viewport,
+		// pViewports    = &viewport,
 		scissorCount  = 1,
-		pScissors     = &scissor,
+		// pScissors     = &scissor,
 	}
 
 	rasterizer := vk.PipelineRasterizationStateCreateInfo {
@@ -838,6 +832,13 @@ createGraphicsPipeline :: proc(using app: ^HelloTriangleApplication) {
 		blendConstants  = {0, 0, 0, 0},
 	}
 
+	dynamicStates := [?]vk.DynamicState{.VIEWPORT, .SCISSOR}
+	dynamicState := vk.PipelineDynamicStateCreateInfo {
+		sType             = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+		dynamicStateCount = u32(len(dynamicStates)),
+		pDynamicStates    = raw_data(dynamicStates[:]),
+	}
+
 	pipelineLayoutInfo := vk.PipelineLayoutCreateInfo {
 		sType          = .PIPELINE_LAYOUT_CREATE_INFO,
 		setLayoutCount = 1,
@@ -858,6 +859,7 @@ createGraphicsPipeline :: proc(using app: ^HelloTriangleApplication) {
 		pMultisampleState   = &multisampling,
 		pDepthStencilState  = &depthStencil,
 		pColorBlendState    = &colorBlending,
+		pDynamicState       = &dynamicState,
 		layout              = pipelineLayout,
 		renderPass          = renderPass,
 		subpass             = 0,
@@ -988,13 +990,14 @@ createCommandPool :: proc(using app: ^HelloTriangleApplication) {
 	queueFamilyIndices := findQueueFamilies(surface, physicalDevice)
 	poolInfo := vk.CommandPoolCreateInfo {
 		sType            = .COMMAND_POOL_CREATE_INFO,
+		flags            = {.RESET_COMMAND_BUFFER},
 		queueFamilyIndex = queueFamilyIndices.graphicsFamily.?,
 	}
 	must(vk.CreateCommandPool(device, &poolInfo, nil, &commandPool))
 }
 
 createCommandBuffers :: proc(using app: ^HelloTriangleApplication) {
-	commandBuffers = make([]vk.CommandBuffer, len(swapChainFramebuffers))
+	commandBuffers = make([]vk.CommandBuffer, MAX_FRAMES_IN_FLIGHT)
 
 	allocInfo := vk.CommandBufferAllocateInfo {
 		sType              = .COMMAND_BUFFER_ALLOCATE_INFO,
@@ -1003,65 +1006,84 @@ createCommandBuffers :: proc(using app: ^HelloTriangleApplication) {
 		commandBufferCount = u32(len(commandBuffers)),
 	}
 	must(vk.AllocateCommandBuffers(device, &allocInfo, raw_data(commandBuffers)))
+}
 
-	for _, i in commandBuffers {
-		beginInfo := vk.CommandBufferBeginInfo {
-			sType = .COMMAND_BUFFER_BEGIN_INFO,
-		}
-
-		must(vk.BeginCommandBuffer(commandBuffers[i], &beginInfo))
-
-		clearValues := [?]vk.ClearValue {
-			{color = vk.ClearColorValue{float32 = [4]f32{0, 0, 0, 1}}},
-			{depthStencil = vk.ClearDepthStencilValue{1, 0}},
-		}
-
-		renderPassInfo := vk.RenderPassBeginInfo {
-			sType = .RENDER_PASS_BEGIN_INFO,
-			renderPass = renderPass,
-			framebuffer = swapChainFramebuffers[i],
-			renderArea = {offset = {0, 0}, extent = swapChainExtent},
-			clearValueCount = u32(len(clearValues)),
-			pClearValues = raw_data(clearValues[:]),
-		}
-
-		vk.CmdBeginRenderPass(commandBuffers[i], &renderPassInfo, .INLINE)
-		{
-			vk.CmdBindPipeline(commandBuffers[i], .GRAPHICS, graphicsPipeline)
-
-			vertexBuffers := [?]vk.Buffer{vertexBuffer}
-			offsets := [?]vk.DeviceSize{0}
-			vk.CmdBindVertexBuffers(
-				commandBuffers[i],
-				0,
-				1,
-				raw_data(vertexBuffers[:]),
-				raw_data(offsets[:]),
-			)
-
-			vk.CmdBindIndexBuffer(commandBuffers[i], indexBuffer, 0, .UINT32)
-			vk.CmdBindDescriptorSets(
-				commandBuffers[i],
-				.GRAPHICS,
-				pipelineLayout,
-				0,
-				1,
-				&descriptorSets[i],
-				0,
-				nil,
-			)
-			vk.CmdDrawIndexed(commandBuffers[i], u32(len(indices)), 1, 0, 0, 0)
-		}
-		vk.CmdEndRenderPass(commandBuffers[i])
-		must(vk.EndCommandBuffer(commandBuffers[i]))
+recordCommandBuffers :: proc(
+	app: ^HelloTriangleApplication,
+	commandBuffer: vk.CommandBuffer,
+	imageIndex: u32,
+) {
+	beginInfo := vk.CommandBufferBeginInfo {
+		sType = .COMMAND_BUFFER_BEGIN_INFO,
 	}
+
+	must(vk.BeginCommandBuffer(commandBuffer, &beginInfo))
+
+	clearValues := [?]vk.ClearValue {
+		{color = vk.ClearColorValue{float32 = [4]f32{0, 0, 0, 1}}},
+		{depthStencil = vk.ClearDepthStencilValue{1, 0}},
+	}
+
+	renderPassInfo := vk.RenderPassBeginInfo {
+		sType = .RENDER_PASS_BEGIN_INFO,
+		renderPass = app.renderPass,
+		framebuffer = app.swapChainFramebuffers[imageIndex],
+		renderArea = {offset = {0, 0}, extent = app.swapChainExtent},
+		clearValueCount = u32(len(clearValues)),
+		pClearValues = raw_data(clearValues[:]),
+	}
+
+	vk.CmdBeginRenderPass(commandBuffer, &renderPassInfo, .INLINE)
+	{
+		vk.CmdBindPipeline(commandBuffer, .GRAPHICS, app.graphicsPipeline)
+
+		viewport := vk.Viewport {
+			x        = 0.0,
+			y        = 0.0,
+			width    = f32(app.swapChainExtent.width),
+			height   = f32(app.swapChainExtent.height),
+			minDepth = 0.0,
+			maxDepth = 1.0,
+		}
+		vk.CmdSetViewport(commandBuffer, 0, 1, &viewport)
+
+		scissor := vk.Rect2D {
+			offset = {0, 0},
+			extent = app.swapChainExtent,
+		}
+		vk.CmdSetScissor(commandBuffer, 0, 1, &scissor)
+
+		vertexBuffers := [?]vk.Buffer{app.vertexBuffer}
+		offsets := [?]vk.DeviceSize{0}
+		vk.CmdBindVertexBuffers(
+			commandBuffer,
+			0,
+			1,
+			raw_data(vertexBuffers[:]),
+			raw_data(offsets[:]),
+		)
+
+		vk.CmdBindIndexBuffer(commandBuffer, app.indexBuffer, 0, .UINT32)
+		vk.CmdBindDescriptorSets(
+			commandBuffer,
+			.GRAPHICS,
+			app.pipelineLayout,
+			0,
+			1,
+			&app.descriptorSets[app.currentFrame],
+			0,
+			nil,
+		)
+		vk.CmdDrawIndexed(commandBuffer, u32(len(app.indices)), 1, 0, 0, 0)
+	}
+	vk.CmdEndRenderPass(commandBuffer)
+	must(vk.EndCommandBuffer(commandBuffer))
 }
 
 createSyncObjects :: proc(using app: ^HelloTriangleApplication) {
 	imageAvailableSemaphores = make([]vk.Semaphore, MAX_FRAMES_IN_FLIGHT)
 	renderFinishedSemaphores = make([]vk.Semaphore, MAX_FRAMES_IN_FLIGHT)
 	inFlightFences = make([]vk.Fence, MAX_FRAMES_IN_FLIGHT)
-	imagesInFlight = make([]vk.Fence, len(swapChainImages))
 
 	semaphoreInfo := vk.SemaphoreCreateInfo {
 		sType = .SEMAPHORE_CREATE_INFO,
@@ -1097,12 +1119,11 @@ drawFrame :: proc(using app: ^HelloTriangleApplication) {
 		assert(false, "failed to acquire swap chain image!")
 	}
 
-	updateUniformBuffer(app, imageIndex)
+	updateUniformBuffer(app, u32(currentFrame))
 
-	if imagesInFlight[imageIndex] != 0 {
-		must(vk.WaitForFences(device, 1, &imagesInFlight[imageIndex], true, bits.U64_MAX))
-	}
-	imagesInFlight[imageIndex] = inFlightFences[currentFrame]
+	must(vk.ResetFences(device, 1, &inFlightFences[currentFrame]))
+	must(vk.ResetCommandBuffer(commandBuffers[currentFrame], {}))
+	recordCommandBuffers(app, commandBuffers[currentFrame], imageIndex)
 
 	waitSemaphores := [?]vk.Semaphore{imageAvailableSemaphores[currentFrame]}
 	waitStates := [?]vk.PipelineStageFlags{{.COLOR_ATTACHMENT_OUTPUT}}
@@ -1113,13 +1134,11 @@ drawFrame :: proc(using app: ^HelloTriangleApplication) {
 		pWaitSemaphores      = raw_data(waitSemaphores[:]),
 		pWaitDstStageMask    = raw_data(waitStates[:]),
 		commandBufferCount   = 1,
-		pCommandBuffers      = &commandBuffers[imageIndex],
+		pCommandBuffers      = &commandBuffers[currentFrame],
 		signalSemaphoreCount = 1,
 		pSignalSemaphores    = raw_data(signalSemaphores[:]),
 	}
 
-
-	must(vk.ResetFences(device, 1, &inFlightFences[currentFrame]))
 	must(vk.QueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]))
 
 	swapChains := [?]vk.SwapchainKHR{swapChain}
@@ -1376,11 +1395,11 @@ createDescriptorSetLayout :: proc(using app: ^HelloTriangleApplication) {
 
 createUniformBuffers :: proc(using app: ^HelloTriangleApplication) {
 	bufferSize: vk.DeviceSize = size_of(UniformBufferObject)
-	uniformBuffers = make([]vk.Buffer, len(swapChainImages))
-	uniformBuffersMemory = make([]vk.DeviceMemory, len(swapChainImages))
-	uniformBuffersMapped = make([]rawptr, len(swapChainImages))
+	uniformBuffers = make([]vk.Buffer, MAX_FRAMES_IN_FLIGHT)
+	uniformBuffersMemory = make([]vk.DeviceMemory, MAX_FRAMES_IN_FLIGHT)
+	uniformBuffersMapped = make([]rawptr, MAX_FRAMES_IN_FLIGHT)
 
-	for i in 0 ..< len(swapChainImages) {
+	for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
 		createBuffer(
 			app,
 			bufferSize,
@@ -1421,34 +1440,34 @@ updateUniformBuffer :: proc(app: ^HelloTriangleApplication, currentImage: u32) {
 
 createDescriptorPool :: proc(using app: ^HelloTriangleApplication) {
 	poolSizes := [?]vk.DescriptorPoolSize {
-		{type = .UNIFORM_BUFFER, descriptorCount = u32(len(swapChainImages))},
-		{type = .COMBINED_IMAGE_SAMPLER, descriptorCount = u32(len(swapChainImages))},
+		{type = .UNIFORM_BUFFER, descriptorCount = MAX_FRAMES_IN_FLIGHT},
+		{type = .COMBINED_IMAGE_SAMPLER, descriptorCount = MAX_FRAMES_IN_FLIGHT},
 	}
 	poolInfo := vk.DescriptorPoolCreateInfo {
 		sType         = .DESCRIPTOR_POOL_CREATE_INFO,
 		poolSizeCount = u32(len(poolSizes)),
 		pPoolSizes    = raw_data(poolSizes[:]),
-		maxSets       = u32(len(swapChainImages)),
+		maxSets       = MAX_FRAMES_IN_FLIGHT,
 	}
 	must(vk.CreateDescriptorPool(device, &poolInfo, nil, &descriptorPool))
 }
 
 createDescriptorSets :: proc(using app: ^HelloTriangleApplication) {
-	layouts := make([]vk.DescriptorSetLayout, len(swapChainImages))
+	layouts := make([]vk.DescriptorSetLayout, MAX_FRAMES_IN_FLIGHT)
 	defer delete(layouts)
 	for _, i in layouts do layouts[i] = descriptorSetLayout
 
 	allocInfo := vk.DescriptorSetAllocateInfo {
 		sType              = .DESCRIPTOR_SET_ALLOCATE_INFO,
 		descriptorPool     = descriptorPool,
-		descriptorSetCount = u32(len(swapChainImages)),
+		descriptorSetCount = u32(MAX_FRAMES_IN_FLIGHT),
 		pSetLayouts        = raw_data(layouts),
 	}
 
-	descriptorSets = make([]vk.DescriptorSet, len(swapChainImages))
+	descriptorSets = make([]vk.DescriptorSet, MAX_FRAMES_IN_FLIGHT)
 	must(vk.AllocateDescriptorSets(device, &allocInfo, raw_data(descriptorSets)))
 
-	for i in 0 ..< len(swapChainImages) {
+	for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
 		bufferInfo := vk.DescriptorBufferInfo {
 			buffer = uniformBuffers[i],
 			offset = 0,
