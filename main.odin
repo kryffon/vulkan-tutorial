@@ -79,6 +79,7 @@ HelloTriangleApplication :: struct {
 	debugMessenger:           vk.DebugUtilsMessengerEXT,
 	surface:                  vk.SurfaceKHR,
 	physicalDevice:           vk.PhysicalDevice,
+	msaaSamples:              vk.SampleCountFlags,
 	device:                   vk.Device,
 
 	// queues and swapchains
@@ -101,6 +102,9 @@ HelloTriangleApplication :: struct {
 	commandPool:              vk.CommandPool,
 
 	// buffers
+	colorImage:               vk.Image,
+	colorImageMemory:         vk.DeviceMemory,
+	colorImageView:           vk.ImageView,
 	depthImage:               vk.Image,
 	depthImageMemory:         vk.DeviceMemory,
 	depthImageView:           vk.ImageView,
@@ -166,6 +170,8 @@ initVulkan :: proc(using app: ^HelloTriangleApplication) {
 	// this load_proc is needed
 	vk.load_proc_addresses_instance(instance)
 
+	app.msaaSamples = {._1}
+
 	setupDebugMessenger(app)
 	createSurface(app)
 	pickPhysicalDevice(app)
@@ -176,6 +182,7 @@ initVulkan :: proc(using app: ^HelloTriangleApplication) {
 	createDescriptorSetLayout(app)
 	createGraphicsPipeline(app)
 	createCommandPool(app)
+	createColorResources(app)
 	createDepthResources(app)
 	createFramebuffers(app)
 	createTextureImage(app)
@@ -222,6 +229,10 @@ cleanupSwapChain :: proc(using app: ^HelloTriangleApplication) {
 	vk.DestroyImageView(device, depthImageView, nil)
 	vk.DestroyImage(device, depthImage, nil)
 	vk.FreeMemory(device, depthImageMemory, nil)
+
+	vk.DestroyImageView(device, colorImageView, nil)
+	vk.DestroyImage(device, colorImage, nil)
+	vk.FreeMemory(device, colorImageMemory, nil)
 
 	for framebuffer in swapChainFramebuffers {
 		vk.DestroyFramebuffer(device, framebuffer, nil)
@@ -298,6 +309,7 @@ recreateSwapChain :: proc(using app: ^HelloTriangleApplication) {
 
 	createSwapChain(app)
 	createImageViews(app)
+	createColorResources(app)
 	createDepthResources(app)
 	createRenderPass(app)
 	createGraphicsPipeline(app)
@@ -469,6 +481,7 @@ pickPhysicalDevice :: proc(using app: ^HelloTriangleApplication) {
 	for device in devices {
 		if isDeviceSuitable(surface, device) {
 			physicalDevice = device
+			msaaSamples = getMaxUsableSampleCount(app)
 			break
 		}
 	}
@@ -799,7 +812,7 @@ createGraphicsPipeline :: proc(using app: ^HelloTriangleApplication) {
 	multisampling := vk.PipelineMultisampleStateCreateInfo {
 		sType                = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
 		sampleShadingEnable  = false,
-		rasterizationSamples = {._1},
+		rasterizationSamples = msaaSamples,
 	}
 
 	depthStencil := vk.PipelineDepthStencilStateCreateInfo {
@@ -870,24 +883,35 @@ createShaderModule :: proc(device: vk.Device, code: []u8) -> vk.ShaderModule {
 createRenderPass :: proc(using app: ^HelloTriangleApplication) {
 	colorAttachment := vk.AttachmentDescription {
 		format         = swapChainImageFormat,
-		samples        = {._1},
+		samples        = msaaSamples,
 		loadOp         = .CLEAR,
 		storeOp        = .STORE,
 		stencilLoadOp  = .DONT_CARE,
 		stencilStoreOp = .DONT_CARE,
 		initialLayout  = .UNDEFINED,
-		finalLayout    = .PRESENT_SRC_KHR,
+		finalLayout    = .COLOR_ATTACHMENT_OPTIMAL,
 	}
 
 	depthAttactment := vk.AttachmentDescription {
 		format         = findDepthFormat(app),
-		samples        = {._1},
+		samples        = msaaSamples,
 		loadOp         = .CLEAR,
 		storeOp        = .DONT_CARE,
 		stencilLoadOp  = .DONT_CARE,
 		stencilStoreOp = .DONT_CARE,
 		initialLayout  = .UNDEFINED,
 		finalLayout    = .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+	}
+
+	colorAttachmentResolve := vk.AttachmentDescription {
+		format         = swapChainImageFormat,
+		samples        = {._1},
+		loadOp         = .DONT_CARE,
+		storeOp        = .STORE,
+		stencilLoadOp  = .DONT_CARE,
+		stencilStoreOp = .DONT_CARE,
+		initialLayout  = .UNDEFINED,
+		finalLayout    = .PRESENT_SRC_KHR,
 	}
 
 	colorAttachmentRef := vk.AttachmentReference {
@@ -900,23 +924,33 @@ createRenderPass :: proc(using app: ^HelloTriangleApplication) {
 		layout     = .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
 	}
 
+	colorAttachmentResolveRef := vk.AttachmentReference {
+		attachment = 2,
+		layout     = .COLOR_ATTACHMENT_OPTIMAL,
+	}
+
 	subpass := vk.SubpassDescription {
 		pipelineBindPoint       = .GRAPHICS,
 		colorAttachmentCount    = 1,
 		pColorAttachments       = &colorAttachmentRef,
 		pDepthStencilAttachment = &depthAttactmentRef,
+		pResolveAttachments     = &colorAttachmentResolveRef,
 	}
 
 	dependency := vk.SubpassDependency {
 		srcSubpass    = vk.SUBPASS_EXTERNAL,
 		dstSubpass    = 0,
 		srcStageMask  = {.COLOR_ATTACHMENT_OUTPUT, .LATE_FRAGMENT_TESTS},
-		srcAccessMask = {.DEPTH_STENCIL_ATTACHMENT_WRITE},
+		srcAccessMask = {.COLOR_ATTACHMENT_WRITE, .DEPTH_STENCIL_ATTACHMENT_WRITE},
 		dstStageMask  = {.COLOR_ATTACHMENT_OUTPUT, .EARLY_FRAGMENT_TESTS},
 		dstAccessMask = {.COLOR_ATTACHMENT_WRITE, .DEPTH_STENCIL_ATTACHMENT_WRITE},
 	}
 
-	attachments := [?]vk.AttachmentDescription{colorAttachment, depthAttactment}
+	attachments := [?]vk.AttachmentDescription {
+		colorAttachment,
+		depthAttactment,
+		colorAttachmentResolve,
+	}
 
 	renderPassInfo := vk.RenderPassCreateInfo {
 		sType           = .RENDER_PASS_CREATE_INFO,
@@ -935,7 +969,7 @@ createFramebuffers :: proc(using app: ^HelloTriangleApplication) {
 	swapChainFramebuffers = make([]vk.Framebuffer, len(swapChainImageViews))
 
 	for _, i in swapChainImageViews {
-		attachments := [?]vk.ImageView{swapChainImageViews[i], depthImageView}
+		attachments := [?]vk.ImageView{colorImageView, depthImageView, swapChainImageViews[i]}
 
 		framebufferInfo := vk.FramebufferCreateInfo {
 			sType           = .FRAMEBUFFER_CREATE_INFO,
@@ -1486,7 +1520,7 @@ createTextureImage :: proc(using app: ^HelloTriangleApplication) {
 	vk.UnmapMemory(device, stagingBufferMemory)
 	
 	// odinfmt: disable
-	createImage(app, u32(texWidth), u32(texHeight), mipLevels, .R8G8B8A8_SRGB, .OPTIMAL, {.TRANSFER_SRC, .TRANSFER_DST, .SAMPLED}, {.DEVICE_LOCAL}, &textureImage, &textureImageMemory)
+	createImage(app, u32(texWidth), u32(texHeight), mipLevels, {._1}, .R8G8B8A8_SRGB, .OPTIMAL, {.TRANSFER_SRC, .TRANSFER_DST, .SAMPLED}, {.DEVICE_LOCAL}, &textureImage, &textureImageMemory)
 	transitionImageLayout(app, textureImage, .R8G8B8A8_SRGB, .UNDEFINED, .TRANSFER_DST_OPTIMAL, mipLevels)
 	copyBufferToImage(app, stagingBuffer, textureImage, u32(texWidth), u32(texHeight))
 	// transitionImageLayout(app, textureImage, .R8G8B8A8_SRGB, .TRANSFER_DST_OPTIMAL, .SHADER_READ_ONLY_OPTIMAL)
@@ -1502,6 +1536,7 @@ createTextureImage :: proc(using app: ^HelloTriangleApplication) {
 createImage :: proc(
 	app: ^HelloTriangleApplication,
 	width, height, mipLevels: u32,
+	numSamples: vk.SampleCountFlags,
 	format: vk.Format,
 	tiling: vk.ImageTiling,
 	usage: vk.ImageUsageFlags,
@@ -1519,7 +1554,7 @@ createImage :: proc(
 		tiling = tiling,
 		initialLayout = .UNDEFINED,
 		usage = usage,
-		samples = {._1},
+		samples = numSamples,
 		sharingMode = .EXCLUSIVE,
 	}
 	must(vk.CreateImage(app.device, &imageInfo, nil, image))
@@ -1687,6 +1722,7 @@ createDepthResources :: proc(using app: ^HelloTriangleApplication) {
 		swapChainExtent.width,
 		swapChainExtent.height,
 		1,
+		msaaSamples,
 		depthFormat,
 		.OPTIMAL,
 		{.DEPTH_STENCIL_ATTACHMENT},
@@ -1889,5 +1925,40 @@ generateMipmaps :: proc(
 		&barrier,
 	)
 	endSingleTimeCommands(app, &commandBuffer)
+}
+
+createColorResources :: proc(using app: ^HelloTriangleApplication) {
+	colorFormat := swapChainImageFormat
+	createImage(
+		app,
+		swapChainExtent.width,
+		swapChainExtent.height,
+		1,
+		msaaSamples,
+		colorFormat,
+		.OPTIMAL,
+		{.TRANSIENT_ATTACHMENT, .COLOR_ATTACHMENT},
+		{.DEVICE_LOCAL},
+		&colorImage,
+		&colorImageMemory,
+	)
+	colorImageView = createImageView(app, colorImage, colorFormat, {.COLOR}, 1)
+}
+
+getMaxUsableSampleCount :: proc(app: ^HelloTriangleApplication) -> vk.SampleCountFlags {
+	physicalDeviceProperties: vk.PhysicalDeviceProperties
+	vk.GetPhysicalDeviceProperties(app.physicalDevice, &physicalDeviceProperties)
+
+	counts :=
+		physicalDeviceProperties.limits.framebufferColorSampleCounts &
+		physicalDeviceProperties.limits.framebufferDepthSampleCounts
+
+	if ._64 in counts do return {._64}
+	if ._32 in counts do return {._32}
+	if ._16 in counts do return {._16}
+	if ._8 in counts do return {._8}
+	if ._4 in counts do return {._4}
+	if ._2 in counts do return {._2}
+	return {._1}
 }
 
